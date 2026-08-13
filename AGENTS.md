@@ -1,35 +1,43 @@
-# Repository Instructions
+# Java Code Style Requirements
 
-These rules apply to code and workflow changes in this repository.
+These rules apply to all Java code written or modified in this repository.
 
-## Java Code
+## Nullability
 
-- Annotate every Java class with JetBrains `@NotNullByDefault`.
-- Mark every nullable type use, field, parameter, return value, local variable, or generic type argument with `@Nullable`; do not use `Optional`.
-- Prefer Java `record` types when they fit the data model.
-- Mark immutable collections, arrays, and NIO buffers with `@Unmodifiable`; mark immutable or read-only views with `@UnmodifiableView`.
-- Put array immutability annotations on the array dimensions, for example `String @Unmodifiable []` or `int @Unmodifiable [] @Unmodifiable []`.
-- Document every class, field, and method with `///` Markdown-style Javadoc.
-- Document record components with `@param` entries in the record documentation, not standalone component comments.
-- Keep documentation accurate and specific; add implementation comments only for non-obvious logic.
+- Annotate every class with JetBrains Annotations `@NotNullByDefault`.
+- Any type, field, parameter, return value, local variable, or generic type argument that may be `null` must be explicitly annotated with `@Nullable`.
+- Nullability must never be implicit.
+
+## Optional Values
+
+- Do not use Java `Optional`.
+- Represent optional or absent values with `@Nullable` instead.
+- Do not introduce APIs that require callers to unwrap `Optional`.
+
+## Java Types
+
+- Use Java `record` types when they fit the data model.
+
+## Immutability Annotations
+
+- Annotate immutable collections and arrays with JetBrains Annotations `@Unmodifiable`.
+- Annotate immutable collection views with JetBrains Annotations `@UnmodifiableView`.
+- Annotate immutable NIO buffers such as `ByteBuffer`, `IntBuffer`, `LongBuffer`, and other `Buffer`
+  subclasses with `@Unmodifiable`.
+- Annotate read-only or immutable views of NIO buffers with `@UnmodifiableView`.
+- For arrays, place the annotation on the array dimension, for example `String @Unmodifiable []`.
+- For multidimensional immutable arrays, annotate every immutable dimension, for example
+  `int @Unmodifiable [] @Unmodifiable []`.
+
+## Documentation
+
+- Every class, field, and method must have documentation.
+- Documentation must use `///` Markdown-style Javadoc comments.
+- Keep documentation accurate and specific to the actual behavior, constraints, and side effects.
+- Add concise implementation comments inside complex logic whenever they materially improve readability or explain non-obvious behavior.
 
 ## Gradle
 
-- Run Gradle with workspace-local state, preferably `./gradlew -g .gradle-user-home ...`.
-- Ensure Gradle commands include `GRADLE_USER_HOME=.gradle-user-home`.
-- Ensure `GRADLE_OPTS` includes `--enable-native-access=ALL-UNNAMED --add-exports=java.base/jdk.internal.misc=ALL-UNNAMED --add-opens=java.base/jdk.internal.misc=ALL-UNNAMED`.
-- Use a ten-minute timeout for Gradle `test` tasks.
-
-## Memory
-
-- Use heap `long[]` pages as the default backing allocation, but store backing as an Unsafe base object plus byte offset.
-- Access page backing through `jdk.internal.misc.Unsafe`.
-
-## Workflow
-
-- After completing a task, update `PLANS.md` only for work that is actually done, and preserve active or still-relevant plans.
-
-## Commit Messages
-
-- After each completed modification, generate a commit message for the user, but do not create the commit.
-- Leave one blank line after the commit message body, then add `Assisted-by: codex:gpt-5.5`.
+- When invoking Gradle in this repository, always set `GRADLE_USER_HOME` to the workspace-local `.gradle-user-home` directory.
+- Prefer commands such as `./gradlew -g .gradle-user-home ...` or the equivalent environment-variable-based configuration.
+- When running Gradle `test` tasks, use a higher timeout of ten minutes.
