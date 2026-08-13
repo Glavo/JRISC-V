@@ -4,6 +4,7 @@ plugins {
     id("java")
     id("application")
     id("com.gradleup.shadow") version "9.4.1"
+    id("org.glavo.gradle-wrapper-neo") version "0.2.0"
 }
 
 group = "org.glavo"
