@@ -5,6 +5,7 @@ package org.glavo.riscv.runtime;
 
 import org.glavo.riscv.exception.RiscVException;
 import org.jetbrains.annotations.NotNullByDefault;
+import org.jetbrains.annotations.Nullable;
 
 /// Stores Linux user-mode state that belongs to one guest thread rather than the whole process.
 @NotNullByDefault
@@ -14,6 +15,18 @@ final class GuestThread {
 
     /// The Linux thread id represented by this guest thread.
     private final int id;
+
+    /// The guest-visible name assigned to this thread.
+    private String name = "";
+
+    /// Whether this guest thread has completed its exit path.
+    private volatile boolean exited;
+
+    /// Whether one FreeBSD `thr_wake` request is pending for consumption by `thr_suspend`.
+    private boolean freeBsdSuspendWakePending;
+
+    /// The anonymous FreeBSD memory-domain policy override, or null to inherit the assigned numbered CPU set.
+    private volatile @Nullable Integer freeBsdDomainPolicyOverride;
 
     /// The guest clear-child-TID address used by thread exit wakeups, or zero when unset.
     private long clearChildTidAddress;
@@ -65,6 +78,51 @@ final class GuestThread {
     /// Returns the Linux thread id represented by this guest thread.
     int id() {
         return id;
+    }
+
+    /// Returns the guest-visible name assigned to this thread.
+    String name() {
+        return name;
+    }
+
+    /// Replaces the guest-visible name assigned to this thread.
+    void setName(String name) {
+        this.name = name;
+    }
+
+    /// Records that this guest thread completed its exit path.
+    void markExited() {
+        exited = true;
+    }
+
+    /// Returns true after this guest thread completed its exit path.
+    boolean exited() {
+        return exited;
+    }
+
+    /// Records one pending FreeBSD `thr_wake` request, coalescing repeated requests.
+    synchronized void requestFreeBsdSuspendWake() {
+        freeBsdSuspendWakePending = true;
+    }
+
+    /// Consumes a pending FreeBSD `thr_wake` request when one exists.
+    synchronized boolean consumeFreeBsdSuspendWake() {
+        if (!freeBsdSuspendWakePending) {
+            return false;
+        }
+        freeBsdSuspendWakePending = false;
+        return true;
+    }
+
+    /// Returns this thread's effective FreeBSD memory-domain policy for the supplied base-set policy.
+    int freeBsdDomainPolicy(int basePolicy) {
+        @Nullable Integer override = freeBsdDomainPolicyOverride;
+        return override == null ? basePolicy : override;
+    }
+
+    /// Replaces this thread's anonymous FreeBSD memory-domain policy.
+    void setFreeBsdDomainPolicy(int policy) {
+        freeBsdDomainPolicyOverride = policy;
     }
 
     /// Returns the guest clear-child-TID address used by this thread, or zero when unset.
@@ -159,6 +217,7 @@ final class GuestThread {
         pointerMaskLength = parent.pointerMaskLength;
         pointerMask = parent.pointerMask;
         taggedAddressAbiEnabled = parent.taggedAddressAbiEnabled;
+        freeBsdDomainPolicyOverride = parent.freeBsdDomainPolicyOverride;
     }
 
     /// Clears per-thread registrations that do not survive a successful `execve`.

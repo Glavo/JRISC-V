@@ -6,7 +6,8 @@ Its long-term goal is to run every Linux and FreeBSD RISC-V 64-bit user-space pr
 Today it can already run real Linux RISC-V userland without a Linux kernel:
 Ubuntu Base binaries, interactive Bash, fastfetch, SQLite, CoreMark, Go programs,
 and RVV workloads. FreeBSD user-space support has also started, with static
-FreeBSD Go programs running through the FreeBSD syscall ABI.
+FreeBSD Go programs using credentials, filesystems, local networking, descriptor
+readiness, kqueue, and child process execution through the FreeBSD syscall ABI.
 
 ## Requirements
 
@@ -95,9 +96,9 @@ to append or override one guest environment entry; `--env NAME` copies the
 current host value.
 
 Guest host sockets are disabled by default. Pass `--network host` to map Linux
-IPv4 and IPv6 TCP/UDP sockets, plus filesystem-backed Unix-domain stream
-sockets, to host Java NIO sockets; `NETLINK_ROUTE` and network-interface ioctl
-metadata remain synthetic. Swing/AWT programs running inside the guest can reach
+or FreeBSD IPv4 and IPv6 TCP/UDP sockets, plus filesystem-backed Unix-domain
+stream sockets, to host Java NIO sockets. Linux `NETLINK_ROUTE` and
+network-interface ioctl metadata remain synthetic. Swing/AWT programs running inside the guest can reach
 an X11 server by bind-mounting the host socket directory, for example
 `--mount type=bind,src=/tmp/.X11-unix,dst=/tmp/.X11-unix,readonly`, and passing
 `--env DISPLAY`. Mount the host Xauthority file too when your X server requires
@@ -138,7 +139,8 @@ configured with CLI options. Host passthrough networking is opt-in with
 datagrams, and bind-mounted Unix-domain stream sockets through the host network
 stack. Local Unix-domain stream `socketpair` descriptors are supported even
 without host networking. Synthetic netlink and interface ioctl metadata remain
-available.
+available. Process creation supports Linux clone-child selection, `wait4`,
+`waitid`, and pollable pidfds created by `pidfd_open` or `CLONE_PIDFD`.
 
 ## Examples
 
@@ -192,7 +194,8 @@ GO_EXECUTABLE=/path/to/go ./gradlew runGoHelloWorldExample
 | Freestanding hot loop | Run a small CPU hot-loop probe. | `./gradlew runHotLoopExample` |
 | Static Linux Go hello-world | Build and run a static `linux/riscv64` Go program. | `./gradlew runGoHelloWorldExample` |
 | Static FreeBSD Go hello-world | Build and run a static `freebsd/riscv64` Go program. | `./gradlew runFreeBsdGoHelloWorldExample` |
-| Static Go showcase | Run a larger Go standard-library workload covering JSON, sorting, compression, hashing, and goroutines. | `./gradlew runGoShowcaseExample` |
+| Static Linux Go showcase | Run a larger Linux Go standard-library workload covering filesystem metadata and mutations, links, local TCP/UDP networking, `os/exec`, executable-path discovery, JSON, sorting, compression, hashing, and goroutines. | `./gradlew runGoShowcaseExample` |
+| Static FreeBSD Go showcase | Run the same filesystem, networking, process, executable-path, and standard-library workload through the FreeBSD syscall ABI and kqueue. | `./gradlew runFreeBsdGoShowcaseExample` |
 | Static musl printf | Run a static musl `printf` hello-world program. | `./gradlew runLinuxStaticPrintfExample` |
 | Static musl framebuffer | Build and run a RISC-V Linux program that renders animation through `/dev/fb0` in a Swing window. | `./gradlew runLinuxStaticFramebufferDemo` |
 | SQLite showcase | Download SQLite, build a static RISC-V file-database demo, and run transactions and queries. | `./gradlew runSQLiteShowcaseExample` |

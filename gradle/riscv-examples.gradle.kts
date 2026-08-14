@@ -256,6 +256,7 @@ tasks.register<JavaExec>("runFreeBsdGoHelloWorldExample") {
 // Static Go showcase example.
 val goShowcaseExampleDirectory = layout.projectDirectory.dir("examples/go/go-showcase")
 val goShowcaseExampleElf = layout.buildDirectory.file("examples/go/go-showcase/showcase")
+val freeBsdGoShowcaseExampleElf = layout.buildDirectory.file("examples/go/go-showcase-freebsd/showcase")
 
 tasks.register<RiscVGoBuildTask>("buildGoShowcaseExample") {
     group = "verification"
@@ -264,6 +265,18 @@ tasks.register<RiscVGoBuildTask>("buildGoShowcaseExample") {
     configureGoExecutable()
     moduleDirectory.set(goShowcaseExampleDirectory)
     outputFile.set(goShowcaseExampleElf)
+    buildCacheDirectory.set(layout.buildDirectory.dir("go-build-cache"))
+    moduleCacheDirectory.set(layout.buildDirectory.dir("go-module-cache"))
+}
+
+tasks.register<RiscVGoBuildTask>("buildFreeBsdGoShowcaseExample") {
+    group = "verification"
+    description = "Builds examples/go/go-showcase as a static freebsd/riscv64 Go workload."
+
+    configureGoExecutable()
+    goOS.set("freebsd")
+    moduleDirectory.set(goShowcaseExampleDirectory)
+    outputFile.set(freeBsdGoShowcaseExampleElf)
     buildCacheDirectory.set(layout.buildDirectory.dir("go-build-cache"))
     moduleCacheDirectory.set(layout.buildDirectory.dir("go-module-cache"))
 }
@@ -285,12 +298,15 @@ tasks.register<JavaExec>("testGoShowcaseExample") {
     doFirst {
         stdout.reset()
         stderr.reset()
-        setArgs(listOf(goShowcaseExampleElf.get().asFile.absolutePath))
+        setArgs(listOf("--network", "host", goShowcaseExampleElf.get().asFile.absolutePath, "/showcase"))
     }
 
     doLast {
         val actualOutput = stdout.toString(StandardCharsets.UTF_8)
-        if (!actualOutput.endsWith("go-showcase-ok\n")) {
+        if (!actualOutput.contains("filesystem-ok\n")
+            || !actualOutput.contains("network-ok\n")
+            || !actualOutput.contains("process-ok\n")
+            || !actualOutput.endsWith("go-showcase-ok\n")) {
             throw GradleException("Unexpected Go showcase output: ${actualOutput.trim()}")
         }
 
@@ -311,7 +327,57 @@ tasks.register<JavaExec>("runGoShowcaseExample") {
     jvmArgs(applicationDefaultJvmArgs)
 
     doFirst {
-        setArgs(listOf(goShowcaseExampleElf.get().asFile.absolutePath))
+        setArgs(listOf("--network", "host", goShowcaseExampleElf.get().asFile.absolutePath, "/showcase"))
+    }
+}
+
+tasks.register<JavaExec>("testFreeBsdGoShowcaseExample") {
+    group = "verification"
+    description = "Builds and verifies the static freebsd/riscv64 Go showcase workload."
+
+    dependsOn("classes", "buildFreeBsdGoShowcaseExample")
+    classpath = sourceSets.named("main").get().runtimeClasspath
+    mainClass = mainClassName
+    jvmArgs(applicationDefaultJvmArgs)
+
+    val stdout = ByteArrayOutputStream()
+    val stderr = ByteArrayOutputStream()
+    standardOutput = stdout
+    errorOutput = stderr
+
+    doFirst {
+        stdout.reset()
+        stderr.reset()
+        setArgs(listOf("--network", "host", freeBsdGoShowcaseExampleElf.get().asFile.absolutePath, "/showcase"))
+    }
+
+    doLast {
+        val actualOutput = stdout.toString(StandardCharsets.UTF_8)
+        if (!actualOutput.contains("filesystem-ok\n")
+            || !actualOutput.contains("network-ok\n")
+            || !actualOutput.contains("process-ok\n")
+            || !actualOutput.endsWith("go-showcase-ok\n")) {
+            throw GradleException("Unexpected FreeBSD Go showcase output: ${actualOutput.trim()}")
+        }
+
+        val actualError = stderr.toString(StandardCharsets.UTF_8)
+        if (actualError.isNotEmpty()) {
+            throw GradleException("FreeBSD Go showcase example wrote to stderr: $actualError")
+        }
+    }
+}
+
+tasks.register<JavaExec>("runFreeBsdGoShowcaseExample") {
+    group = "verification"
+    description = "Runs the static freebsd/riscv64 Go showcase workload with the JRISC-V CLI."
+
+    dependsOn("classes", "buildFreeBsdGoShowcaseExample")
+    classpath = sourceSets.named("main").get().runtimeClasspath
+    mainClass = mainClassName
+    jvmArgs(applicationDefaultJvmArgs)
+
+    doFirst {
+        setArgs(listOf("--network", "host", freeBsdGoShowcaseExampleElf.get().asFile.absolutePath, "/showcase"))
     }
 }
 
@@ -2204,6 +2270,7 @@ tasks.register("checkShowcaseExamples") {
 
     dependsOn(
         "testGoShowcaseExample",
+        "testFreeBsdGoShowcaseExample",
         "testHotLoopExample",
         "testSQLiteShowcaseExample",
         "testRvvVectorAddExample",

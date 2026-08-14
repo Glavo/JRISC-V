@@ -41,6 +41,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.Arrays;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -196,6 +197,12 @@ public final class GuestSyscallsTest {
     /// The Linux RISC-V syscall number for `unlinkat`.
     private static final long SYS_UNLINKAT = 35;
 
+    /// The Linux RISC-V syscall number for `symlinkat`.
+    private static final long SYS_SYMLINKAT = 36;
+
+    /// The Linux RISC-V syscall number for `linkat`.
+    private static final long SYS_LINKAT = 37;
+
     /// The Linux RISC-V syscall number for `renameat`.
     private static final long SYS_RENAMEAT = 38;
 
@@ -210,6 +217,9 @@ public final class GuestSyscallsTest {
 
     /// The Linux RISC-V syscall number for `ftruncate`.
     private static final long SYS_FTRUNCATE = 46;
+
+    /// The Linux RISC-V syscall number for `fallocate`.
+    private static final long SYS_FALLOCATE = 47;
 
     /// The Linux RISC-V syscall number for `faccessat`.
     private static final long SYS_FACCESSAT = 48;
@@ -312,6 +322,9 @@ public final class GuestSyscallsTest {
 
     /// The Linux RISC-V syscall number for `capset`.
     private static final long SYS_CAPSET = 91;
+
+    /// The Linux RISC-V syscall number for `waitid`.
+    private static final long SYS_WAITID = 95;
 
     /// The Linux RISC-V syscall number for `set_tid_address`.
     private static final long SYS_SET_TID_ADDRESS = 96;
@@ -550,6 +563,15 @@ public final class GuestSyscallsTest {
     /// The Linux RISC-V syscall number for `clone`.
     private static final long SYS_CLONE = 220;
 
+    /// The Linux RISC-V syscall number for `fadvise64`.
+    private static final long SYS_FADVISE64 = 223;
+
+    /// The Linux RISC-V syscall number for `pidfd_send_signal`.
+    private static final long SYS_PIDFD_SEND_SIGNAL = 424;
+
+    /// The Linux RISC-V syscall number for `pidfd_open`.
+    private static final long SYS_PIDFD_OPEN = 434;
+
     /// The Linux RISC-V syscall number for `clone3`.
     private static final long SYS_CLONE3 = 435;
 
@@ -621,6 +643,9 @@ public final class GuestSyscallsTest {
 
     /// The Linux RISC-V syscall number for `mlock2`.
     private static final long SYS_MLOCK2 = 284;
+
+    /// The Linux RISC-V syscall number for `copy_file_range`.
+    private static final long SYS_COPY_FILE_RANGE = 285;
 
     /// The Linux RISC-V syscall number for `preadv2`.
     private static final long SYS_PREADV2 = 286;
@@ -1294,6 +1319,9 @@ public final class GuestSyscallsTest {
     /// Linux `POLLOUT`.
     private static final int POLLOUT = 0x004;
 
+    /// Linux `POLLHUP`.
+    private static final int POLLHUP = 0x010;
+
     /// Linux `POLLNVAL`.
     private static final int POLLNVAL = 0x020;
 
@@ -1357,6 +1385,24 @@ public final class GuestSyscallsTest {
     /// Linux `SA_SIGINFO`.
     private static final long SA_SIGINFO = 0x00000004L;
 
+    /// Linux `P_PID`.
+    private static final long WAIT_ID_PROCESS = 1;
+
+    /// Linux `P_PIDFD`.
+    private static final long WAIT_ID_PROCESS_FILE_DESCRIPTOR = 3;
+
+    /// Linux `WEXITED`.
+    private static final long WAIT_ID_EXITED = 0x0000_0004L;
+
+    /// Linux `WNOWAIT`.
+    private static final long WAIT_ID_NO_WAIT = 0x0100_0000L;
+
+    /// Linux internal `__WCLONE`.
+    private static final long WAIT_CLONE_CHILDREN = 0x8000_0000L;
+
+    /// Linux `CLD_EXITED`.
+    private static final int WAIT_ID_CHILD_EXITED = 1;
+
     /// The byte size of Linux generic 64-bit `siginfo_t`.
     private static final long SIGNAL_INFO_SIZE = 128;
 
@@ -1365,6 +1411,15 @@ public final class GuestSyscallsTest {
 
     /// The byte offset of `si_code` inside Linux generic 64-bit `siginfo_t`.
     private static final long SIGNAL_INFO_CODE_OFFSET = 2L * Integer.BYTES;
+
+    /// The byte offset of `si_pid` inside Linux RISC-V 64-bit `siginfo_t`.
+    private static final long SIGNAL_INFO_PROCESS_ID_OFFSET = 4L * Integer.BYTES;
+
+    /// The byte offset of `si_uid` inside Linux RISC-V 64-bit `siginfo_t`.
+    private static final long SIGNAL_INFO_USER_ID_OFFSET = 5L * Integer.BYTES;
+
+    /// The byte offset of `si_status` inside Linux RISC-V 64-bit `siginfo_t`.
+    private static final long SIGNAL_INFO_STATUS_OFFSET = 6L * Integer.BYTES;
 
     /// The byte offset of `si_addr` inside the Linux generic 64-bit `siginfo_t` fault union.
     private static final long SIGNAL_INFO_FAULT_ADDRESS_OFFSET = 2L * Long.BYTES;
@@ -3104,7 +3159,7 @@ public final class GuestSyscallsTest {
             state.syscalls().handle(state, TEST_PC);
             assertEquals(0, state.register(10));
 
-            setSyscall(state, SYS_CLONE, 0, 0, 0, 0, 0);
+            setSyscall(state, SYS_CLONE, SIGCHLD, 0, 0, 0, 0);
             state.syscalls().handle(state, TEST_PC);
             long childProcessId = state.register(10);
             assertTrue(childProcessId > 0);
@@ -3629,6 +3684,78 @@ public final class GuestSyscallsTest {
             setSyscall(state, SYS_OPENAT, AT_FDCWD, filePathAddress, O_RDONLY | O_DIRECTORY, 0);
             state.syscalls().handle(state, TEST_PC);
             assertEquals(ENOTDIR, state.register(10));
+        }
+    }
+
+    /// Verifies that `linkat` and `symlinkat` create sandboxed host links with readable metadata and targets.
+    @Test
+    public void linkSyscallsCreateSandboxedHostLinks() throws Exception {
+        Files.writeString(tempDirectory.resolve("target.txt"), "link-data", StandardCharsets.UTF_8);
+
+        try (Memory memory = new Memory(Memory.DEFAULT_BASE_ADDRESS, 4096)) {
+            RiscVThreadState state = state(
+                    memory,
+                    new ByteArrayInputStream(new byte[0]),
+                    new ByteArrayOutputStream(),
+                    new ByteArrayOutputStream(),
+                    memory.baseAddress(),
+                    tempDirectory);
+            long targetPathAddress = memory.baseAddress();
+            long hardLinkPathAddress = memory.baseAddress() + 128;
+            long symbolicTargetAddress = memory.baseAddress() + 256;
+            long symbolicLinkPathAddress = memory.baseAddress() + 384;
+            long bufferAddress = memory.baseAddress() + 512;
+            long statAddress = memory.baseAddress() + 768;
+            writeGuestString(memory, targetPathAddress, "/target.txt");
+            writeGuestString(memory, hardLinkPathAddress, "/hard-link.txt");
+            writeGuestString(memory, symbolicTargetAddress, "target.txt");
+            writeGuestString(memory, symbolicLinkPathAddress, "/symbolic-link.txt");
+
+            setSyscall(
+                    state,
+                    SYS_LINKAT,
+                    AT_FDCWD,
+                    targetPathAddress,
+                    AT_FDCWD,
+                    hardLinkPathAddress,
+                    0);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(0, state.register(10));
+            assertTrue(Files.isSameFile(tempDirectory.resolve("target.txt"), tempDirectory.resolve("hard-link.txt")));
+
+            setSyscall(state, SYS_SYMLINKAT, symbolicTargetAddress, AT_FDCWD, symbolicLinkPathAddress);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(0, state.register(10));
+            assertTrue(Files.isSymbolicLink(tempDirectory.resolve("symbolic-link.txt")));
+
+            setSyscall(state, SYS_READLINKAT, AT_FDCWD, symbolicLinkPathAddress, bufferAddress, 64);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals("target.txt".length(), state.register(10));
+            assertArrayEquals(
+                    "target.txt".getBytes(StandardCharsets.UTF_8),
+                    memory.readBytes(bufferAddress, "target.txt".length()));
+
+            setSyscall(
+                    state,
+                    SYS_NEWFSTATAT,
+                    AT_FDCWD,
+                    symbolicLinkPathAddress,
+                    statAddress,
+                    AT_SYMLINK_NOFOLLOW);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(0, state.register(10));
+            assertEquals(SYMBOLIC_LINK_STAT_MODE, memory.readInt(statAddress + STAT_MODE_OFFSET));
+
+            setSyscall(
+                    state,
+                    SYS_LINKAT,
+                    AT_FDCWD,
+                    targetPathAddress,
+                    AT_FDCWD,
+                    hardLinkPathAddress,
+                    AT_REMOVEDIR);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(EINVAL, state.register(10));
         }
     }
 
@@ -5071,6 +5198,253 @@ public final class GuestSyscallsTest {
         }
     }
 
+    /// Verifies Linux allocation and advice syscalls use raw errno results and preserve file offsets.
+    @Test
+    public void fileRangeSyscallsUseLinuxAbi() throws Exception {
+        Files.writeString(tempDirectory.resolve("range.txt"), "abc", StandardCharsets.UTF_8);
+        try (Memory memory = new Memory(Memory.DEFAULT_BASE_ADDRESS, 4096)) {
+            RiscVThreadState state = state(
+                    memory,
+                    new ByteArrayInputStream(new byte[0]),
+                    new ByteArrayOutputStream(),
+                    new ByteArrayOutputStream(),
+                    memory.baseAddress(),
+                    tempDirectory);
+            long pathAddress = memory.baseAddress();
+            long bufferAddress = memory.baseAddress() + 0x100;
+            long pipeAddress = memory.baseAddress() + 0x200;
+            writeGuestString(memory, pathAddress, "/range.txt");
+
+            setSyscall(state, SYS_OPENAT, AT_FDCWD, pathAddress, O_RDWR, 0);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(3, state.register(10));
+            int fileDescriptor = (int) state.register(10);
+            setSyscall(state, SYS_FALLOCATE, fileDescriptor, 0, 8, 4);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(0, state.register(10));
+            memory.writeByte(bufferAddress, (byte) 'Z');
+            setSyscall(state, SYS_WRITE, fileDescriptor, bufferAddress, 1);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(1, state.register(10));
+
+            setSyscall(state, SYS_FADVISE64, fileDescriptor, 0, 0, 0);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(0, state.register(10));
+            setSyscall(state, SYS_FADVISE64, fileDescriptor, -1, 0, 0);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(EINVAL, state.register(10));
+            setSyscall(state, SYS_FALLOCATE, fileDescriptor, 1, 0, 1);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(ENOTSUP, state.register(10));
+            setSyscall(state, SYS_CLOSE, fileDescriptor, 0, 0);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(0, state.register(10));
+
+            setSyscall(state, SYS_OPENAT, AT_FDCWD, pathAddress, O_RDONLY, 0);
+            state.syscalls().handle(state, TEST_PC);
+            fileDescriptor = (int) state.register(10);
+            setSyscall(state, SYS_FALLOCATE, fileDescriptor, 0, 0, 1);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(EBADF, state.register(10));
+            setSyscall(state, SYS_CLOSE, fileDescriptor, 0, 0);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(0, state.register(10));
+
+            setSyscall(state, SYS_PIPE2, pipeAddress, 0, 0);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(0, state.register(10));
+            int readFileDescriptor = memory.readInt(pipeAddress);
+            int writeFileDescriptor = memory.readInt(pipeAddress + Integer.BYTES);
+            setSyscall(state, SYS_FADVISE64, readFileDescriptor, 0, 0, 0);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(ESPIPE, state.register(10));
+            setSyscall(state, SYS_FALLOCATE, writeFileDescriptor, 0, 0, 1);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(ESPIPE, state.register(10));
+            setSyscall(state, SYS_CLOSE, readFileDescriptor, 0, 0);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(0, state.register(10));
+            setSyscall(state, SYS_CLOSE, writeFileDescriptor, 0, 0);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(0, state.register(10));
+        }
+
+        byte[] bytes = Files.readAllBytes(tempDirectory.resolve("range.txt"));
+        assertEquals(12, bytes.length);
+        assertArrayEquals("Zbc".getBytes(StandardCharsets.UTF_8), Arrays.copyOf(bytes, 3));
+        assertArrayEquals(new byte[9], Arrays.copyOfRange(bytes, 3, bytes.length));
+    }
+
+    /// Verifies Linux regular-file range copies honor explicit and descriptor offsets.
+    @Test
+    public void copyFileRangeUsesLinuxOffsetSemantics() throws Exception {
+        Files.writeString(tempDirectory.resolve("copy-source.txt"), "0123456789", StandardCharsets.UTF_8);
+        Files.writeString(tempDirectory.resolve("copy-target.txt"), "..........", StandardCharsets.UTF_8);
+        try (Memory memory = new Memory(Memory.DEFAULT_BASE_ADDRESS, 4096)) {
+            RiscVThreadState state = state(
+                    memory,
+                    new ByteArrayInputStream(new byte[0]),
+                    new ByteArrayOutputStream(),
+                    new ByteArrayOutputStream(),
+                    memory.baseAddress(),
+                    tempDirectory);
+            long sourcePathAddress = memory.baseAddress();
+            long targetPathAddress = memory.baseAddress() + 0x40;
+            long inputOffsetAddress = memory.baseAddress() + 0x100;
+            long outputOffsetAddress = memory.baseAddress() + 0x108;
+            long pipeAddress = memory.baseAddress() + 0x200;
+            writeGuestString(memory, sourcePathAddress, "/copy-source.txt");
+            writeGuestString(memory, targetPathAddress, "/copy-target.txt");
+
+            setSyscall(state, SYS_OPENAT, AT_FDCWD, sourcePathAddress, O_RDONLY, 0);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(3, state.register(10));
+            int sourceFileDescriptor = (int) state.register(10);
+            setSyscall(state, SYS_OPENAT, AT_FDCWD, targetPathAddress, O_RDWR, 0);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(4, state.register(10));
+            int targetFileDescriptor = (int) state.register(10);
+
+            setSyscall(state, SYS_LSEEK, sourceFileDescriptor, 1, 0);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(1, state.register(10));
+            setSyscall(state, SYS_LSEEK, targetFileDescriptor, 2, 0);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(2, state.register(10));
+
+            memory.writeLong(inputOffsetAddress, 3);
+            memory.writeLong(outputOffsetAddress, 5);
+            setSyscall(
+                    state,
+                    SYS_COPY_FILE_RANGE,
+                    sourceFileDescriptor,
+                    inputOffsetAddress,
+                    targetFileDescriptor,
+                    outputOffsetAddress,
+                    4,
+                    0);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(4, state.register(10));
+            assertEquals(7, memory.readLong(inputOffsetAddress));
+            assertEquals(9, memory.readLong(outputOffsetAddress));
+
+            setSyscall(state, SYS_LSEEK, sourceFileDescriptor, 0, 1);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(1, state.register(10));
+            setSyscall(state, SYS_LSEEK, targetFileDescriptor, 0, 1);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(2, state.register(10));
+
+            setSyscall(
+                    state,
+                    SYS_COPY_FILE_RANGE,
+                    sourceFileDescriptor,
+                    0,
+                    targetFileDescriptor,
+                    0,
+                    2,
+                    0);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(2, state.register(10));
+            setSyscall(state, SYS_LSEEK, sourceFileDescriptor, 0, 1);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(3, state.register(10));
+            setSyscall(state, SYS_LSEEK, targetFileDescriptor, 0, 1);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(4, state.register(10));
+
+            setSyscall(
+                    state,
+                    SYS_COPY_FILE_RANGE,
+                    sourceFileDescriptor,
+                    0,
+                    targetFileDescriptor,
+                    0,
+                    1,
+                    1);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(EINVAL, state.register(10));
+
+            memory.writeLong(inputOffsetAddress, 0);
+            memory.writeLong(outputOffsetAddress, 1);
+            setSyscall(
+                    state,
+                    SYS_COPY_FILE_RANGE,
+                    targetFileDescriptor,
+                    inputOffsetAddress,
+                    targetFileDescriptor,
+                    outputOffsetAddress,
+                    4,
+                    0);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(EINVAL, state.register(10));
+            setSyscall(
+                    state,
+                    SYS_COPY_FILE_RANGE,
+                    sourceFileDescriptor,
+                    memory.endAddress(),
+                    targetFileDescriptor,
+                    outputOffsetAddress,
+                    1,
+                    0);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(EFAULT, state.register(10));
+
+            setSyscall(state, SYS_PIPE2, pipeAddress, 0, 0);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(0, state.register(10));
+            int pipeReader = memory.readInt(pipeAddress);
+            int pipeWriter = memory.readInt(pipeAddress + Integer.BYTES);
+            setSyscall(
+                    state,
+                    SYS_COPY_FILE_RANGE,
+                    pipeReader,
+                    0,
+                    targetFileDescriptor,
+                    0,
+                    1,
+                    0);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(EINVAL, state.register(10));
+            setSyscall(state, SYS_CLOSE, pipeReader, 0, 0);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(0, state.register(10));
+            setSyscall(state, SYS_CLOSE, pipeWriter, 0, 0);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(0, state.register(10));
+
+            setSyscall(state, SYS_CLOSE, targetFileDescriptor, 0, 0);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(0, state.register(10));
+            setSyscall(state, SYS_OPENAT, AT_FDCWD, targetPathAddress, O_WRONLY | O_APPEND, 0);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(4, state.register(10));
+            targetFileDescriptor = (int) state.register(10);
+            setSyscall(
+                    state,
+                    SYS_COPY_FILE_RANGE,
+                    sourceFileDescriptor,
+                    0,
+                    targetFileDescriptor,
+                    0,
+                    1,
+                    0);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(EBADF, state.register(10));
+
+            setSyscall(state, SYS_CLOSE, sourceFileDescriptor, 0, 0);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(0, state.register(10));
+            setSyscall(state, SYS_CLOSE, targetFileDescriptor, 0, 0);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(0, state.register(10));
+        }
+
+        assertEquals(
+                "..12.3456.",
+                Files.readString(tempDirectory.resolve("copy-target.txt"), StandardCharsets.UTF_8));
+    }
+
     /// Verifies path mutation syscalls for sandboxed files and directories.
     @Test
     public void fileMutationSyscallsStaySandboxed() throws Exception {
@@ -5264,7 +5638,11 @@ public final class GuestSyscallsTest {
             writeGuestString(memory, pathAddress, "directory");
             setSyscall(state, SYS_OPENAT, AT_FDCWD, pathAddress, O_RDONLY, 0);
             state.syscalls().handle(state, TEST_PC);
-            assertEquals(EISDIR, state.register(10));
+            assertEquals(3, state.register(10));
+
+            setSyscall(state, SYS_CLOSE, 3, 0, 0);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(0, state.register(10));
 
             writeGuestString(memory, pathAddress, "message.txt");
             setSyscall(state, SYS_OPENAT, AT_FDCWD, pathAddress, O_WRONLY | O_CREAT | O_EXCL, 0);
@@ -5842,7 +6220,7 @@ public final class GuestSyscallsTest {
 
             setSyscall(state, SYS_SETPGID, 0, 0, 0);
             state.syscalls().handle(state, TEST_PC);
-            assertEquals(0, state.register(10));
+            assertEquals(EPERM, state.register(10));
 
             setSyscall(state, SYS_GETPGID, 0, 0, 0);
             state.syscalls().handle(state, TEST_PC);
@@ -5854,11 +6232,11 @@ public final class GuestSyscallsTest {
 
             setSyscall(state, SYS_SETPGID, -1, 0, 0);
             state.syscalls().handle(state, TEST_PC);
-            assertEquals(EINVAL, state.register(10));
+            assertEquals(ESRCH, state.register(10));
 
             setSyscall(state, SYS_SETSID, 0, 0, 0);
             state.syscalls().handle(state, TEST_PC);
-            assertEquals(1, state.register(10));
+            assertEquals(EPERM, state.register(10));
 
             setSyscall(state, SYS_GETPRIORITY, 0, 0, 0);
             state.syscalls().handle(state, TEST_PC);
@@ -5867,6 +6245,22 @@ public final class GuestSyscallsTest {
             setSyscall(state, SYS_SETPRIORITY, 0, 0, 5);
             state.syscalls().handle(state, TEST_PC);
             assertEquals(0, state.register(10));
+
+            setSyscall(state, SYS_GETPRIORITY, 0, 0, 0);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(15, state.register(10));
+
+            setSyscall(state, SYS_SETPRIORITY, 0, 0, -1);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(EACCES, state.register(10));
+
+            setSyscall(state, SYS_SETPRIORITY, 0, 0, 99);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(0, state.register(10));
+
+            setSyscall(state, SYS_GETPRIORITY, 0, 0, 0);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(1, state.register(10));
 
             setSyscall(state, SYS_GETPRIORITY, 3, 0, 0);
             state.syscalls().handle(state, TEST_PC);
@@ -6247,6 +6641,353 @@ public final class GuestSyscallsTest {
         }
     }
 
+    /// Verifies Linux `waitid` reports but does not reap an exited child when `WNOWAIT` is set.
+    @Test
+    public void waitidObservesChildBeforeWait4ReapsIt() throws Exception {
+        CompletableFuture<Void> childExited = new CompletableFuture<>();
+        GuestThreadRunner runner = (childMemory, childState) -> {
+            try {
+                childState.syscalls().recordThreadExit(childState, 7);
+                childExited.complete(null);
+            } catch (Throwable throwable) {
+                childExited.completeExceptionally(throwable);
+                childState.syscalls().recordThreadFailure(throwable);
+            }
+        };
+
+        try (Memory memory = Memory.sparse(Memory.DEFAULT_BASE_ADDRESS, 65_536)) {
+            long baseAddress = memory.baseAddress();
+            assertTrue(memory.map(baseAddress, 16_384));
+            GuestSyscalls syscalls = new LinuxGuestSyscalls(
+                    memory,
+                    new ByteArrayInputStream(new byte[0]),
+                    new ByteArrayOutputStream(),
+                    new ByteArrayOutputStream(),
+                    baseAddress + 16_384,
+                    new String[0],
+                    TimeSource.system(),
+                    runner);
+            RiscVThreadState state = new RiscVThreadState(
+                    memory,
+                    0,
+                    false,
+                    ElfImage.ABSENT_ADDRESS,
+                    ElfImage.ABSENT_ADDRESS,
+                    syscalls);
+            long signalInfoAddress = baseAddress + 64;
+            long rusageAddress = baseAddress + 256;
+            long statusAddress = baseAddress + 512;
+
+            setSyscall(state, SYS_CLONE, SIGCHLD, 0, 0, 0, 0);
+            state.syscalls().handle(state, TEST_PC);
+            long childProcessId = state.register(10);
+            assertTrue(childProcessId > 0);
+            childExited.get(5, TimeUnit.SECONDS);
+
+            memory.clear(signalInfoAddress, SIGNAL_INFO_SIZE);
+            memory.clear(rusageAddress, 144);
+            setSyscall(
+                    state,
+                    SYS_WAITID,
+                    WAIT_ID_PROCESS,
+                    childProcessId,
+                    signalInfoAddress,
+                    WAIT_ID_EXITED | WAIT_ID_NO_WAIT,
+                    rusageAddress);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(0, state.register(10));
+            assertEquals(SIGCHLD, memory.readInt(signalInfoAddress));
+            assertEquals(WAIT_ID_CHILD_EXITED, memory.readInt(signalInfoAddress + SIGNAL_INFO_CODE_OFFSET));
+            assertEquals(childProcessId, memory.readInt(signalInfoAddress + SIGNAL_INFO_PROCESS_ID_OFFSET));
+            assertEquals(
+                    GuestCredentials.DEFAULT_USER_ID,
+                    memory.readUnsignedInt(signalInfoAddress + SIGNAL_INFO_USER_ID_OFFSET));
+            assertEquals(7, memory.readInt(signalInfoAddress + SIGNAL_INFO_STATUS_OFFSET));
+            assertArrayEquals(new byte[144], memory.readBytes(rusageAddress, 144));
+
+            setSyscall(state, SYS_WAIT4, childProcessId, statusAddress, 0, 0);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(childProcessId, state.register(10));
+            assertEquals(7 << Byte.SIZE, memory.readInt(statusAddress));
+
+            setSyscall(
+                    state,
+                    SYS_WAITID,
+                    WAIT_ID_PROCESS,
+                    childProcessId,
+                    signalInfoAddress,
+                    WAIT_ID_EXITED | WAIT_ID_NO_WAIT,
+                    0);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(ECHILD, state.register(10));
+        }
+    }
+
+    /// Verifies `pidfd_open`, `pidfd_send_signal`, and self `P_PIDFD` wait validation.
+    @Test
+    public void pidfdOpenRepresentsTheCurrentProcess() {
+        try (Memory memory = new Memory(Memory.DEFAULT_BASE_ADDRESS, 1024)) {
+            RiscVThreadState state = state(memory, new ByteArrayInputStream(new byte[0]));
+            long signalInfoAddress = memory.baseAddress() + 128;
+
+            setSyscall(state, SYS_GETPID, 0, 0, 0);
+            state.syscalls().handle(state, TEST_PC);
+            long processId = state.register(10);
+
+            setSyscall(state, SYS_PIDFD_OPEN, processId, 0, 0);
+            state.syscalls().handle(state, TEST_PC);
+            int processFileDescriptor = (int) state.register(10);
+            assertEquals(3, processFileDescriptor);
+
+            setSyscall(state, SYS_FCNTL, processFileDescriptor, F_GETFD, 0);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(FD_CLOEXEC, state.register(10));
+
+            setSyscall(state, SYS_FCNTL, processFileDescriptor, F_GETFL, 0);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(O_RDWR, state.register(10));
+
+            setSyscall(state, SYS_PIDFD_OPEN, processId, O_EXCL, 0);
+            state.syscalls().handle(state, TEST_PC);
+            int threadFileDescriptor = (int) state.register(10);
+            assertEquals(4, threadFileDescriptor);
+
+            setSyscall(state, SYS_PIDFD_SEND_SIGNAL, threadFileDescriptor, 0, 0, 0);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(0, state.register(10));
+
+            setSyscall(state, SYS_CLOSE, threadFileDescriptor, 0, 0);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(0, state.register(10));
+
+            setSyscall(state, SYS_PIDFD_SEND_SIGNAL, processFileDescriptor, 0, 0, 0);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(0, state.register(10));
+
+            setSyscall(
+                    state,
+                    SYS_WAITID,
+                    WAIT_ID_PROCESS_FILE_DESCRIPTOR,
+                    processFileDescriptor,
+                    signalInfoAddress,
+                    WAIT_ID_EXITED,
+                    0);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(ECHILD, state.register(10));
+
+            setSyscall(state, SYS_PIDFD_OPEN, 0, 0, 0);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(EINVAL, state.register(10));
+
+            setSyscall(state, SYS_PIDFD_OPEN, 99, 0, 0);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(ESRCH, state.register(10));
+
+            setSyscall(state, SYS_PIDFD_OPEN, processId, 1, 0);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(EINVAL, state.register(10));
+
+            setSyscall(state, SYS_PIDFD_SEND_SIGNAL, 1, 0, 0, 0);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(EBADF, state.register(10));
+
+            setSyscall(state, SYS_CLOSE, processFileDescriptor, 0, 0);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(0, state.register(10));
+
+            setSyscall(state, SYS_PIDFD_SEND_SIGNAL, processFileDescriptor, 0, 0, 0);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(EBADF, state.register(10));
+        }
+    }
+
+    /// Verifies `CLONE_PIDFD` returns a pollable descriptor accepted by `waitid(P_PIDFD)`.
+    @Test
+    public void clonePidfdTracksAndReapsACloneChild() throws Exception {
+        CountDownLatch releaseChild = new CountDownLatch(1);
+        CompletableFuture<Void> childExited = new CompletableFuture<>();
+        GuestThreadRunner runner = (childMemory, childState) -> {
+            try {
+                if (!releaseChild.await(5, TimeUnit.SECONDS)) {
+                    throw new AssertionError("Timed out waiting to release pidfd child process");
+                }
+                childState.syscalls().recordThreadExit(childState, 5);
+                childExited.complete(null);
+            } catch (Throwable throwable) {
+                childExited.completeExceptionally(throwable);
+                childState.syscalls().recordThreadFailure(throwable);
+            }
+        };
+
+        try (Memory memory = Memory.sparse(Memory.DEFAULT_BASE_ADDRESS, 65_536)) {
+            long baseAddress = memory.baseAddress();
+            assertTrue(memory.map(baseAddress, 16_384));
+            GuestSyscalls syscalls = new LinuxGuestSyscalls(
+                    memory,
+                    new ByteArrayInputStream(new byte[0]),
+                    new ByteArrayOutputStream(),
+                    new ByteArrayOutputStream(),
+                    baseAddress + 16_384,
+                    new String[0],
+                    TimeSource.system(),
+                    runner);
+            RiscVThreadState state = new RiscVThreadState(
+                    memory,
+                    0,
+                    false,
+                    ElfImage.ABSENT_ADDRESS,
+                    ElfImage.ABSENT_ADDRESS,
+                    syscalls);
+            long processFileDescriptorAddress = baseAddress + 64;
+            long signalInfoAddress = baseAddress + 128;
+            long pollAddress = baseAddress + 384;
+            long timeoutAddress = baseAddress + 448;
+
+            setSyscall(
+                    state,
+                    SYS_CLONE,
+                    CLONE_VM | CLONE_VFORK | CLONE_PIDFD,
+                    0,
+                    processFileDescriptorAddress,
+                    0,
+                    0);
+            state.syscalls().handle(state, TEST_PC);
+            long childProcessId = state.register(10);
+            assertTrue(childProcessId > 0);
+            int processFileDescriptor = memory.readInt(processFileDescriptorAddress);
+            assertEquals(3, processFileDescriptor);
+
+            setSyscall(state, SYS_FCNTL, processFileDescriptor, F_GETFD, 0);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(FD_CLOEXEC, state.register(10));
+
+            setSyscall(state, SYS_PIDFD_OPEN, childProcessId, O_NONBLOCK, 0);
+            state.syscalls().handle(state, TEST_PC);
+            int nonblockingProcessFileDescriptor = (int) state.register(10);
+            assertEquals(4, nonblockingProcessFileDescriptor);
+
+            setSyscall(
+                    state,
+                    SYS_WAITID,
+                    WAIT_ID_PROCESS_FILE_DESCRIPTOR,
+                    nonblockingProcessFileDescriptor,
+                    signalInfoAddress,
+                    WAIT_ID_EXITED | WAIT_CLONE_CHILDREN,
+                    0);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(EAGAIN, state.register(10));
+
+            setSyscall(state, SYS_CLOSE, nonblockingProcessFileDescriptor, 0, 0);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(0, state.register(10));
+
+            memory.writeLong(timeoutAddress, 0);
+            memory.writeLong(timeoutAddress + Long.BYTES, 0);
+            writePollFileDescriptor(memory, pollAddress, 0, processFileDescriptor, POLLIN);
+            setSyscall(state, SYS_PPOLL, pollAddress, 1, timeoutAddress, 0, 0);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(0, state.register(10));
+
+            releaseChild.countDown();
+            childExited.get(5, TimeUnit.SECONDS);
+
+            writePollFileDescriptor(memory, pollAddress, 0, processFileDescriptor, POLLIN);
+            setSyscall(state, SYS_PPOLL, pollAddress, 1, timeoutAddress, 0, 0);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(1, state.register(10));
+            assertEquals(POLLIN, pollRevents(memory, pollAddress, 0));
+
+            setSyscall(state, SYS_PIDFD_SEND_SIGNAL, processFileDescriptor, 0, 0, 0);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(ESRCH, state.register(10));
+
+            memory.clear(signalInfoAddress, SIGNAL_INFO_SIZE);
+            setSyscall(
+                    state,
+                    SYS_WAITID,
+                    WAIT_ID_PROCESS_FILE_DESCRIPTOR,
+                    processFileDescriptor,
+                    signalInfoAddress,
+                    WAIT_ID_EXITED | WAIT_CLONE_CHILDREN,
+                    0);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(0, state.register(10));
+            assertEquals(SIGCHLD, memory.readInt(signalInfoAddress));
+            assertEquals(WAIT_ID_CHILD_EXITED, memory.readInt(signalInfoAddress + SIGNAL_INFO_CODE_OFFSET));
+            assertEquals(childProcessId, memory.readInt(signalInfoAddress + SIGNAL_INFO_PROCESS_ID_OFFSET));
+            assertEquals(5, memory.readInt(signalInfoAddress + SIGNAL_INFO_STATUS_OFFSET));
+
+            writePollFileDescriptor(memory, pollAddress, 0, processFileDescriptor, POLLIN);
+            setSyscall(state, SYS_PPOLL, pollAddress, 1, timeoutAddress, 0, 0);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(1, state.register(10));
+            assertEquals(POLLIN | POLLHUP, pollRevents(memory, pollAddress, 0));
+
+            setSyscall(
+                    state,
+                    SYS_WAITID,
+                    WAIT_ID_PROCESS_FILE_DESCRIPTOR,
+                    processFileDescriptor,
+                    signalInfoAddress,
+                    WAIT_ID_EXITED | WAIT_CLONE_CHILDREN,
+                    0);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(ECHILD, state.register(10));
+        }
+    }
+
+    /// Verifies Linux clone children without `SIGCHLD` require the `__WCLONE` wait option.
+    @Test
+    public void wait4CloneSelectionUsesChildExitSignal() throws Exception {
+        CompletableFuture<Void> childExited = new CompletableFuture<>();
+        GuestThreadRunner runner = (childMemory, childState) -> {
+            try {
+                childState.syscalls().recordThreadExit(childState, 3);
+                childExited.complete(null);
+            } catch (Throwable throwable) {
+                childExited.completeExceptionally(throwable);
+                childState.syscalls().recordThreadFailure(throwable);
+            }
+        };
+
+        try (Memory memory = Memory.sparse(Memory.DEFAULT_BASE_ADDRESS, 65_536)) {
+            long baseAddress = memory.baseAddress();
+            assertTrue(memory.map(baseAddress, 16_384));
+            GuestSyscalls syscalls = new LinuxGuestSyscalls(
+                    memory,
+                    new ByteArrayInputStream(new byte[0]),
+                    new ByteArrayOutputStream(),
+                    new ByteArrayOutputStream(),
+                    baseAddress + 16_384,
+                    new String[0],
+                    TimeSource.system(),
+                    runner);
+            RiscVThreadState state = new RiscVThreadState(
+                    memory,
+                    0,
+                    false,
+                    ElfImage.ABSENT_ADDRESS,
+                    ElfImage.ABSENT_ADDRESS,
+                    syscalls);
+            long statusAddress = baseAddress + 64;
+
+            setSyscall(state, SYS_CLONE, 0, 0, 0, 0, 0);
+            state.syscalls().handle(state, TEST_PC);
+            long childProcessId = state.register(10);
+            assertTrue(childProcessId > 0);
+            childExited.get(5, TimeUnit.SECONDS);
+
+            setSyscall(state, SYS_WAIT4, childProcessId, statusAddress, 0, 0);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(ECHILD, state.register(10));
+
+            setSyscall(state, SYS_WAIT4, childProcessId, statusAddress, WAIT_CLONE_CHILDREN, 0);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(childProcessId, state.register(10));
+            assertEquals(3 << Byte.SIZE, memory.readInt(statusAddress));
+        }
+    }
+
     /// Verifies child-process exits queue a `SIGCHLD` frame before the next syscall returns to user code.
     @Test
     public void childExitQueuesSigchldSignalFrame() throws Exception {
@@ -6300,7 +7041,7 @@ public final class GuestSyscallsTest {
 
             state.setRegister(2, stackPointer);
             state.setPc(TEST_PC);
-            setSyscall(state, SYS_CLONE, 0, 0, 0, 0, 0);
+            setSyscall(state, SYS_CLONE, SIGCHLD, 0, 0, 0, 0);
             state.syscalls().handle(state, TEST_PC);
             long childProcessId = state.register(10);
             assertTrue(childProcessId > 0);
@@ -6424,6 +7165,22 @@ public final class GuestSyscallsTest {
             state.syscalls().handle(state, TEST_PC);
             assertEquals(EAGAIN, state.register(10));
 
+            setSyscall(state, SYS_CLONE, CLONE_PIDFD, stackAddress, 0, 0, 0, 0);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(EFAULT, state.register(10));
+
+            setSyscall(
+                    state,
+                    SYS_CLONE,
+                    CLONE_PIDFD | CLONE_PARENT_SETTID,
+                    stackAddress,
+                    memory.baseAddress() + 32,
+                    0,
+                    0,
+                    0);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(EINVAL, state.register(10));
+
             setSyscall(state, SYS_CLONE, REQUIRED_THREAD_CLONE_FLAGS & ~CLONE_THREAD, stackAddress, 0, 0, 0, 0);
             state.syscalls().handle(state, TEST_PC);
             assertEquals(EINVAL, state.register(10));
@@ -6470,7 +7227,12 @@ public final class GuestSyscallsTest {
             memory.writeLong(argumentsAddress + CLONE_ARGS_EXIT_SIGNAL_OFFSET, 0);
             setSyscall(state, SYS_CLONE3, argumentsAddress, CLONE_ARGS_SIZE, 0);
             state.syscalls().handle(state, TEST_PC);
-            assertEquals(EINVAL, state.register(10));
+            assertEquals(EAGAIN, state.register(10));
+
+            memory.writeLong(argumentsAddress + CLONE_ARGS_PIDFD_OFFSET, 0);
+            setSyscall(state, SYS_CLONE3, argumentsAddress, CLONE_ARGS_SIZE, 0);
+            state.syscalls().handle(state, TEST_PC);
+            assertEquals(EFAULT, state.register(10));
 
             memory.writeLong(argumentsAddress + CLONE_ARGS_FLAGS_OFFSET, 0);
             setSyscall(state, SYS_CLONE3, argumentsAddress, 63, 0);

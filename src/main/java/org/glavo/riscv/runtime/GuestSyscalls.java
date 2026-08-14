@@ -41,11 +41,13 @@ import java.nio.file.DirectoryStream;
 import java.nio.file.DirectoryNotEmptyException;
 import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
 import java.nio.file.LinkOption;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.BasicFileAttributeView;
 import java.nio.file.attribute.FileTime;
 import java.time.DateTimeException;
@@ -55,6 +57,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.EnumSet;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.LongUnaryOperator;
@@ -63,7 +66,7 @@ import java.util.function.LongUnaryOperator;
 @SuppressWarnings("OctalInteger")
 @NotNullByDefault
 public sealed abstract class GuestSyscalls implements AutoCloseable
-        permits LinuxGuestSyscalls, FreeBsdGuestSyscalls {
+        permits LinuxGuestSyscalls {
     /// Linux `EBADF` as a raw negative syscall result.
     protected static final long EBADF = -9;
 
@@ -118,11 +121,17 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
     /// Linux `EISDIR` as a raw negative syscall result.
     protected static final long EISDIR = -21;
 
+    /// Linux `ENFILE` as a raw negative syscall result.
+    protected static final long ENFILE = -23;
+
     /// Linux `EINVAL` as a raw negative syscall result.
     protected static final long EINVAL = -22;
 
     /// Linux `ENOTTY` as a raw negative syscall result.
     protected static final long ENOTTY = -25;
+
+    /// Linux `EFBIG` as a raw negative syscall result.
+    protected static final long EFBIG = -27;
 
     /// Linux `ERANGE` as a raw negative syscall result.
     protected static final long ERANGE = -34;
@@ -138,6 +147,9 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
 
     /// Linux `ENODATA` as a raw negative syscall result.
     protected static final long ENODATA = -61;
+
+    /// Linux `EOVERFLOW` as a raw negative syscall result.
+    protected static final long EOVERFLOW = -75;
 
     /// Linux `ENOTSUP` as a raw negative syscall result.
     protected static final long ENOTSUP = -95;
@@ -247,6 +259,9 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
     /// The maximum transient buffer size used by one `splice` copy step.
     protected static final int SPLICE_BUFFER_SIZE = 64 * 1024;
 
+    /// The maximum transient buffer size used by one regular-file range copy step.
+    protected static final int FILE_COPY_BUFFER_SIZE = 64 * 1024;
+
     /// Linux `SPLICE_F_MOVE`.
     protected static final long SPLICE_F_MOVE = 1;
 
@@ -283,6 +298,9 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
 
     /// Linux `AT_SYMLINK_NOFOLLOW`.
     protected static final long AT_SYMLINK_NOFOLLOW = 0x100;
+
+    /// Linux `AT_SYMLINK_FOLLOW`.
+    protected static final long AT_SYMLINK_FOLLOW = 0x400;
 
     /// Linux `AT_EACCESS`.
     protected static final long AT_EACCESS = 0x200;
@@ -468,6 +486,9 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
 
     /// Linux `CLOSE_RANGE_CLOEXEC`.
     protected static final long CLOSE_RANGE_CLOEXEC = 1L << 2;
+
+    /// FreeBSD `CLOSE_RANGE_CLOFORK`.
+    protected static final long CLOSE_RANGE_CLOFORK = 1L << 3;
 
     /// Flags supported by `close_range`.
     protected static final long SUPPORTED_CLOSE_RANGE_FLAGS = CLOSE_RANGE_UNSHARE | CLOSE_RANGE_CLOEXEC;
@@ -784,6 +805,12 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
     /// Linux `MADV_FREE`.
     protected static final long MADV_FREE = 8;
 
+    /// The lowest valid POSIX file-advice value.
+    protected static final long POSIX_FADV_NORMAL = 0;
+
+    /// The highest valid POSIX file-advice value.
+    protected static final long POSIX_FADV_NOREUSE = 5;
+
     /// Linux `MADV_DONTFORK`.
     protected static final long MADV_DONTFORK = 10;
 
@@ -898,8 +925,22 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
     /// Linux `WCONTINUED`.
     protected static final long WAIT_CONTINUED = 0x00000008L;
 
+    /// Linux internal `__WNOTHREAD`.
+    protected static final long WAIT_NOT_THREAD = 0x20000000L;
+
+    /// Linux internal `__WALL`.
+    protected static final long WAIT_ALL_CHILDREN = 0x40000000L;
+
+    /// Linux internal `__WCLONE`.
+    protected static final long WAIT_CLONE_CHILDREN = 0x80000000L;
+
     /// Wait options accepted by the simulator.
-    protected static final long SUPPORTED_WAIT_OPTIONS = WAIT_NO_HANG | WAIT_UNTRACED | WAIT_CONTINUED;
+    protected static final long SUPPORTED_WAIT_OPTIONS = WAIT_NO_HANG
+            | WAIT_UNTRACED
+            | WAIT_CONTINUED
+            | WAIT_NOT_THREAD
+            | WAIT_ALL_CHILDREN
+            | WAIT_CLONE_CHILDREN;
 
     /// The byte size of Linux generic 64-bit kernel `sigset_t`.
     protected static final long KERNEL_SIGSET_SIZE = 8;
@@ -936,6 +977,24 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
 
     /// The byte size of the minimal CPU affinity mask exposed to the guest.
     protected static final long MINIMUM_CPU_AFFINITY_MASK_SIZE = Long.BYTES;
+
+    /// POSIX `PRIO_PROCESS` priority target selector.
+    protected static final int PRIO_PROCESS = 0;
+
+    /// POSIX `PRIO_PGRP` priority target selector.
+    protected static final int PRIO_PROCESS_GROUP = 1;
+
+    /// POSIX `PRIO_USER` priority target selector.
+    protected static final int PRIO_USER = 2;
+
+    /// The highest scheduling priority represented by a portable nice value.
+    protected static final int NICE_MINIMUM = -20;
+
+    /// The lowest scheduling priority represented by a portable nice value.
+    protected static final int NICE_MAXIMUM = 19;
+
+    /// The raw Linux syscall value corresponding to nice level zero.
+    protected static final int LINUX_DEFAULT_RAW_PRIORITY = 20;
 
     /// Linux `SCHED_OTHER`.
     protected static final int SCHED_OTHER = 0;
@@ -1101,6 +1160,15 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
 
     /// The `st_blocks` byte offset inside Linux generic 64-bit `struct stat`.
     protected static final int STAT_BLOCK_COUNT_OFFSET = 64;
+
+    /// The `st_atim` byte offset inside Linux generic 64-bit `struct stat`.
+    protected static final int STAT_ACCESS_TIME_OFFSET = 72;
+
+    /// The `st_mtim` byte offset inside Linux generic 64-bit `struct stat`.
+    protected static final int STAT_MODIFICATION_TIME_OFFSET = 88;
+
+    /// The `st_ctim` byte offset inside Linux generic 64-bit `struct stat`.
+    protected static final int STAT_CHANGE_TIME_OFFSET = 104;
 
     /// The byte offset of `f_type` inside Linux generic 64-bit `struct statfs`.
     protected static final int STATFS_TYPE_OFFSET = 0;
@@ -1351,11 +1419,17 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
     /// Overrides for standard descriptors when guest code redirects stdin, stdout, or stderr.
     protected final @Nullable OpenFile[] standardFiles = new @Nullable OpenFile[3];
 
+    /// Whether each standard descriptor remains open in this process.
+    protected final boolean[] standardFileOpen = {true, true, true};
+
     /// Descriptor flags for standard descriptors.
     protected final boolean[] standardFileCloseOnExec = new boolean[3];
 
     /// Descriptor flags for guest-opened file descriptors.
     protected final ArrayList<Boolean> openFileCloseOnExecFlags = new ArrayList<>();
+
+    /// Descriptors carrying the FreeBSD `FD_CLOFORK` flag.
+    protected final HashSet<Integer> fileDescriptorsCloseOnFork = new HashSet<>();
 
     /// The most recently allocated pseudoterminal pair exposed through `/dev/pts/0`.
     protected @Nullable PtyDevice currentPtyDevice;
@@ -1997,15 +2071,16 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
         closeChildProcesses();
         for (int index = 0; index < standardFiles.length; index++) {
             @Nullable OpenFile openFile = standardFiles[index];
-            if (openFile == null) {
-                continue;
-            }
-
-            try {
-                standardFiles[index] = null;
-                releaseOpenFile(openFile);
-            } catch (IOException exception) {
-                throw new RiscVException("Failed to close guest standard file descriptor", exception);
+            standardFiles[index] = null;
+            standardFileOpen[index] = false;
+            standardFileCloseOnExec[index] = false;
+            setFileDescriptorCloseOnFork(index, false);
+            if (openFile != null) {
+                try {
+                    releaseOpenFile(openFile);
+                } catch (IOException exception) {
+                    throw new RiscVException("Failed to close guest standard file descriptor", exception);
+                }
             }
         }
         for (int index = 0; index < openFiles.size(); index++) {
@@ -2016,6 +2091,7 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
 
             try {
                 openFiles.set(index, null);
+                setFileDescriptorCloseOnFork(index + 3, false);
                 releaseOpenFile(openFile);
             } catch (IOException exception) {
                 throw new RiscVException("Failed to close guest file descriptor", exception);
@@ -2457,6 +2533,29 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
             }
         }
 
+        return selectWithTimeout(
+                state,
+                descriptorLimit,
+                fileDescriptorSetSize,
+                readFileDescriptorsAddress,
+                writeFileDescriptorsAddress,
+                exceptionFileDescriptorsAddress,
+                timeoutNanoseconds,
+                immediateTimeout,
+                signalMaskAddress);
+    }
+
+    /// Reports selected descriptor readiness using a validated timeout and optional low-word signal mask.
+    protected long selectWithTimeout(
+            RiscVThreadState state,
+            int descriptorLimit,
+            long fileDescriptorSetSize,
+            long readFileDescriptorsAddress,
+            long writeFileDescriptorsAddress,
+            long exceptionFileDescriptorsAddress,
+            long timeoutNanoseconds,
+            boolean immediateTimeout,
+            long signalMaskAddress) {
         boolean[] requestedReadFileDescriptors = readFdSet(readFileDescriptorsAddress, descriptorLimit);
         boolean[] requestedWriteFileDescriptors = readFdSet(writeFileDescriptorsAddress, descriptorLimit);
         boolean[] requestedExceptionFileDescriptors = readFdSet(exceptionFileDescriptorsAddress, descriptorLimit);
@@ -2574,6 +2673,28 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
         return 1L << (fileDescriptor % FD_SET_BITS_PER_WORD);
     }
 
+    /// Reports descriptor readiness through millisecond-timeout `poll` semantics.
+    protected long poll(
+            RiscVThreadState state,
+            long fileDescriptorsAddress,
+            long fileDescriptorCount,
+            int timeoutMilliseconds) {
+        if (fileDescriptorCount < 0 || fileDescriptorCount > Integer.MAX_VALUE) {
+            return EINVAL;
+        }
+        long fileDescriptorsSize = fileDescriptorCount * POLL_FD_SIZE;
+        if (fileDescriptorCount > 0 && !memory.isBacked(fileDescriptorsAddress, fileDescriptorsSize)) {
+            return EFAULT;
+        }
+        return pollWithTimeout(
+                state,
+                fileDescriptorsAddress,
+                fileDescriptorCount,
+                epollTimeoutNanoseconds(timeoutMilliseconds),
+                timeoutMilliseconds == 0,
+                0);
+    }
+
     /// Reports descriptor readiness through Linux `ppoll`, waiting for readiness or timeout when needed.
     protected long ppoll(
             RiscVThreadState state,
@@ -2611,6 +2732,23 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
             return EFAULT;
         }
 
+        return pollWithTimeout(
+                state,
+                fileDescriptorsAddress,
+                fileDescriptorCount,
+                timeoutNanoseconds,
+                immediateTimeout,
+                signalMaskAddress);
+    }
+
+    /// Reports polled descriptor readiness using a validated timeout and optional low-word signal mask.
+    protected long pollWithTimeout(
+            RiscVThreadState state,
+            long fileDescriptorsAddress,
+            long fileDescriptorCount,
+            long timeoutNanoseconds,
+            boolean immediateTimeout,
+            long signalMaskAddress) {
         GuestThread thread = state.guestThread();
         long savedSignalMask = thread.signalMask();
         if (signalMaskAddress != 0) {
@@ -3120,6 +3258,246 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
         return directory == null ? ENOENT : 0;
     }
 
+    /// Creates a symbolic link below a configured filesystem mount.
+    protected long symlinkat(long targetAddress, long directoryFileDescriptor, long linkPathAddress) {
+        @Nullable String target = readGuestPath(targetAddress);
+        if (target == null) {
+            return ENAMETOOLONG;
+        }
+        @Nullable String linkPath = readGuestPath(linkPathAddress);
+        if (linkPath == null) {
+            return ENAMETOOLONG;
+        }
+        if (target.isEmpty() || linkPath.isEmpty()) {
+            return ENOENT;
+        }
+        if (!canResolvePathFrom(directoryFileDescriptor, linkPath)) {
+            return EBADF;
+        }
+
+        @Nullable TarPath tarPath = resolveTarPath(directoryFileDescriptor, linkPath, false);
+        if (tarPath != null) {
+            return symlinkTarPath(tarPath, target);
+        }
+        if (resolveVirtualPath(directoryFileDescriptor, linkPath, false) != null) {
+            return EROFS;
+        }
+
+        @Nullable Path hostFile = resolveHostFile(directoryFileDescriptor, linkPath);
+        if (hostFile == null) {
+            return EACCES;
+        }
+        long parentError = validateSandboxedParent(hostFile);
+        if (parentError != 0) {
+            return parentError;
+        }
+        @Nullable Path parent = hostFile.getParent();
+        if (parent == null) {
+            return EACCES;
+        }
+        long parentAccess = accessHostFile(parent, W_OK | X_OK);
+        if (parentAccess != 0) {
+            return parentAccess;
+        }
+        if (hostFileOnReadOnlyMount(hostFile)) {
+            return EROFS;
+        }
+
+        try {
+            if (pathEntryExists(hostFile)) {
+                return EEXIST;
+            }
+            Files.createSymbolicLink(hostFile, Path.of(target));
+            return 0;
+        } catch (FileAlreadyExistsException exception) {
+            return EEXIST;
+        } catch (InvalidPathException exception) {
+            return EINVAL;
+        } catch (IOException | UnsupportedOperationException | SecurityException exception) {
+            return EACCES;
+        }
+    }
+
+    /// Creates a symbolic link inside a writable memory tar mount.
+    protected long symlinkTarPath(TarPath tarPath, String target) {
+        TarMount mount = tarPath.mount();
+        if (mount.readOnly()) {
+            return EROFS;
+        }
+        if (tarPath.node() != null) {
+            return EEXIST;
+        }
+        @Nullable TarNode parent = tarParentDirectory(mount, tarPath.guestPath());
+        if (parent == null) {
+            return ENOENT;
+        }
+        if (!canAccessTarDirectory(parent, W_OK | X_OK)) {
+            return EACCES;
+        }
+
+        String relativePath = GuestFileSystem.relativeGuestPath(tarPath.guestPath(), mount.guestPath());
+        @Nullable TarNode link = mount.fileSystem().createSymbolicLink(
+                relativePath,
+                target,
+                STAT_MODE_ALL,
+                credentials.effectiveUserId(),
+                createdEntryGroupId(parent));
+        return link == null ? ENOENT : 0;
+    }
+
+    /// Creates a hard link below configured filesystem mounts.
+    protected long linkat(
+            long oldDirectoryFileDescriptor,
+            long oldPathAddress,
+            long newDirectoryFileDescriptor,
+            long newPathAddress,
+            long flags) {
+        if ((flags & ~AT_SYMLINK_FOLLOW) != 0) {
+            return EINVAL;
+        }
+
+        @Nullable String oldGuestPath = readGuestPath(oldPathAddress);
+        if (oldGuestPath == null) {
+            return ENAMETOOLONG;
+        }
+        @Nullable String newGuestPath = readGuestPath(newPathAddress);
+        if (newGuestPath == null) {
+            return ENAMETOOLONG;
+        }
+        if (oldGuestPath.isEmpty() || newGuestPath.isEmpty()) {
+            return ENOENT;
+        }
+        if (!canResolvePathFrom(oldDirectoryFileDescriptor, oldGuestPath)
+                || !canResolvePathFrom(newDirectoryFileDescriptor, newGuestPath)) {
+            return EBADF;
+        }
+
+        @Nullable String oldAbsoluteGuestPath = absoluteGuestPath(oldDirectoryFileDescriptor, oldGuestPath);
+        @Nullable String newAbsoluteGuestPath = absoluteGuestPath(newDirectoryFileDescriptor, newGuestPath);
+        if (oldAbsoluteGuestPath == null || newAbsoluteGuestPath == null) {
+            return EACCES;
+        }
+        @Nullable Mount oldMount = mountForGuestPath(oldAbsoluteGuestPath);
+        @Nullable Mount newMount = mountForGuestPath(newAbsoluteGuestPath);
+        if (oldMount == null || newMount == null) {
+            return EACCES;
+        }
+        if (oldMount != newMount) {
+            return EXDEV;
+        }
+
+        boolean followSource = (flags & AT_SYMLINK_FOLLOW) != 0;
+        if (oldMount instanceof TarMount) {
+            @Nullable TarPath oldTarPath = fileSystem.resolveTarPath(oldAbsoluteGuestPath, followSource);
+            @Nullable TarPath newTarPath = fileSystem.resolveTarPath(newAbsoluteGuestPath, false);
+            if (oldTarPath == null || newTarPath == null) {
+                return EXDEV;
+            }
+            return linkTarPath(oldTarPath, newTarPath);
+        }
+        if (oldMount instanceof VirtualMount) {
+            return EROFS;
+        }
+
+        @Nullable Path oldHostFile = resolveHostFile(oldDirectoryFileDescriptor, oldGuestPath);
+        @Nullable Path newHostFile = resolveHostFile(newDirectoryFileDescriptor, newGuestPath);
+        if (oldHostFile == null || newHostFile == null) {
+            return EACCES;
+        }
+        return linkHostFile(oldHostFile, newHostFile, followSource);
+    }
+
+    /// Creates a hard link between two sandboxed host paths.
+    protected long linkHostFile(Path oldHostFile, Path newHostFile, boolean followSource) {
+        long newParentError = validateSandboxedParent(newHostFile);
+        if (newParentError != 0) {
+            return newParentError;
+        }
+        @Nullable Path newParent = newHostFile.getParent();
+        if (newParent == null) {
+            return EACCES;
+        }
+        long newParentAccess = accessHostFile(newParent, W_OK | X_OK);
+        if (newParentAccess != 0) {
+            return newParentAccess;
+        }
+        if (hostFileOnReadOnlyMount(newHostFile)) {
+            return EROFS;
+        }
+
+        try {
+            if (!pathEntryExists(oldHostFile)) {
+                return ENOENT;
+            }
+            long oldParentAccess = accessHostParent(oldHostFile);
+            if (oldParentAccess != 0) {
+                return oldParentAccess;
+            }
+            boolean symbolicLink = Files.isSymbolicLink(oldHostFile);
+            Path source = followSource && symbolicLink ? oldHostFile.toRealPath() : oldHostFile;
+            if (!symbolicLink || followSource) {
+                if (!canonicalFileStaysBelowMount(source)) {
+                    return EACCES;
+                }
+            }
+            if (Files.isDirectory(source, LinkOption.NOFOLLOW_LINKS)) {
+                return EPERM;
+            }
+            if (pathEntryExists(newHostFile)) {
+                return EEXIST;
+            }
+
+            @Nullable GuestFileMetadata metadata = symbolicLink && !followSource
+                    ? null
+                    : hostFileMetadata(source, false);
+            Files.createLink(newHostFile, source);
+            if (metadata != null) {
+                fileMetadataStore.put(newHostFile, metadata);
+            }
+            return 0;
+        } catch (FileAlreadyExistsException exception) {
+            return EEXIST;
+        } catch (NoSuchFileException exception) {
+            return ENOENT;
+        } catch (IOException | UnsupportedOperationException | SecurityException exception) {
+            return EACCES;
+        }
+    }
+
+    /// Creates a hard link inside a writable memory tar mount.
+    protected long linkTarPath(TarPath oldTarPath, TarPath newTarPath) {
+        TarMount mount = oldTarPath.mount();
+        if (mount != newTarPath.mount()) {
+            return EXDEV;
+        }
+        if (mount.readOnly()) {
+            return EROFS;
+        }
+        @Nullable TarNode oldNode = oldTarPath.node();
+        if (oldNode == null) {
+            return ENOENT;
+        }
+        if (oldNode.isDirectory()) {
+            return EPERM;
+        }
+        if (newTarPath.node() != null) {
+            return EEXIST;
+        }
+        if (!canSearchTarAncestors(oldNode)) {
+            return EACCES;
+        }
+        @Nullable TarNode newParent = tarParentDirectory(mount, newTarPath.guestPath());
+        if (newParent == null) {
+            return ENOENT;
+        }
+        if (!canAccessTarDirectory(newParent, W_OK | X_OK)) {
+            return EACCES;
+        }
+
+        String relativePath = GuestFileSystem.relativeGuestPath(newTarPath.guestPath(), mount.guestPath());
+        return mount.fileSystem().createHardLink(relativePath, oldNode) == null ? ENOENT : 0;
+    }
+
     /// Removes a file or empty directory below a configured filesystem mount.
     protected long unlinkat(long directoryFileDescriptor, long pathAddress, long flags) {
         if ((flags & ~AT_REMOVEDIR) != 0) {
@@ -3414,7 +3792,7 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
         return mount.fileSystem().moveNode(oldNode, relativePath) == null ? ENOENT : 0;
     }
 
-    /// Handles `renameat2` without Linux-specific nonzero rename flags.
+    /// Handles extended guest rename entry points that do not request nonzero rename flags.
     protected long renameat2(
             long oldDirectoryFileDescriptor,
             long oldPathAddress,
@@ -3544,6 +3922,124 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
         } catch (IOException | SecurityException exception) {
             return EACCES;
         }
+    }
+
+    /// Allocates a regular file range without changing existing data or the open-file offset.
+    protected long posixFallocate(int fileDescriptor, long offset, long length) {
+        if (offset < 0 || length <= 0) {
+            return EINVAL;
+        }
+        if (offset > Long.MAX_VALUE - length) {
+            return EFBIG;
+        }
+
+        @Nullable OpenFile openFile = openFile(fileDescriptor);
+        if (openFile == null) {
+            return EBADF;
+        }
+        if (!openFile.writable()) {
+            return EBADF;
+        }
+        if (openFile.isPipe()) {
+            return ESPIPE;
+        }
+        if (!openFile.isHostFile() || openFile.isDirectory() || openFile.isCharacterDevice()) {
+            return ENODEV;
+        }
+
+        long end = offset + length;
+        try {
+            SeekableByteChannel channel = openFile.channel();
+            if (end > channel.size()) {
+                resizeHostChannel(channel, end);
+            }
+            return 0;
+        } catch (IOException | SecurityException exception) {
+            return EACCES;
+        }
+    }
+
+    /// Handles Linux `fallocate` mode zero through the shared POSIX allocation operation.
+    protected long fallocate(int fileDescriptor, long mode, long offset, long length) {
+        return mode == 0 ? posixFallocate(fileDescriptor, offset, length) : ENOTSUP;
+    }
+
+    /// Zeroes the portion of a writable regular-file range before EOF without changing its size or open-file offset.
+    protected long zeroFileRange(int fileDescriptor, long offset, long length) {
+        if (offset < 0 || length <= 0 || offset > Long.MAX_VALUE - length) {
+            return EINVAL;
+        }
+
+        @Nullable OpenFile openFile = openFile(fileDescriptor);
+        if (openFile == null) {
+            return EBADF;
+        }
+        if (!openFile.writable()) {
+            return EBADF;
+        }
+        if (openFile.isPipe()) {
+            return ESPIPE;
+        }
+        if (!openFile.isHostFile() || openFile.isDirectory() || openFile.isCharacterDevice()) {
+            return ENODEV;
+        }
+
+        try {
+            SeekableByteChannel channel = openFile.channel();
+            long size = channel.size();
+            long zeroLength = offset >= size ? 0 : Math.min(length, size - offset);
+            writeZeroFileRange(channel, offset, zeroLength);
+            return zeroLength;
+        } catch (IOException | SecurityException exception) {
+            return EACCES;
+        }
+    }
+
+    /// Writes zero bytes at a fixed host-file range while preserving the channel position.
+    protected static void writeZeroFileRange(SeekableByteChannel channel, long offset, long length) throws IOException {
+        if (length == 0) {
+            return;
+        }
+
+        byte[] zeros = new byte[(int) Math.min(length, FILE_COPY_BUFFER_SIZE)];
+        long position = channel.position();
+        try {
+            channel.position(offset);
+            long remaining = length;
+            while (remaining > 0) {
+                ByteBuffer buffer = ByteBuffer.wrap(zeros, 0, (int) Math.min(remaining, zeros.length));
+                while (buffer.hasRemaining()) {
+                    if (channel.write(buffer) <= 0) {
+                        throw new IOException("Host file channel made no progress while zeroing a guest range");
+                    }
+                }
+                remaining -= buffer.limit();
+            }
+        } finally {
+            channel.position(position);
+        }
+    }
+
+    /// Validates a POSIX file-access hint for a seekable regular file.
+    protected long posixFadvise(int fileDescriptor, long offset, long length, long advice) {
+        if (offset < 0 || length < 0 || offset > Long.MAX_VALUE - length) {
+            return EINVAL;
+        }
+        if (advice < POSIX_FADV_NORMAL || advice > POSIX_FADV_NOREUSE) {
+            return EINVAL;
+        }
+
+        @Nullable OpenFile openFile = openFile(fileDescriptor);
+        if (openFile == null) {
+            return EBADF;
+        }
+        if (openFile.isDirectory() || openFile.isCharacterDevice()) {
+            return ENODEV;
+        }
+        if (!openFile.isHostFile()) {
+            return ESPIPE;
+        }
+        return 0;
     }
 
     /// Changes the guest-visible current working directory to a sandboxed host directory.
@@ -4076,6 +4572,23 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
 
     /// Updates access and modification times for a sandboxed path or open descriptor.
     protected long utimensat(long directoryFileDescriptor, long pathAddress, long timesAddress, long flags) {
+        return utimensat(
+                directoryFileDescriptor,
+                pathAddress,
+                timesAddress,
+                flags,
+                UTIME_NOW,
+                UTIME_OMIT);
+    }
+
+    /// Updates timestamps using ABI-specific `UTIME_NOW` and `UTIME_OMIT` nanosecond sentinels.
+    protected long utimensat(
+            long directoryFileDescriptor,
+            long pathAddress,
+            long timesAddress,
+            long flags,
+            long nowNanoseconds,
+            long omitNanoseconds) {
         if ((flags & ~SUPPORTED_UTIMENSAT_FLAGS) != 0) {
             return EINVAL;
         }
@@ -4083,7 +4596,7 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
             return EFAULT;
         }
 
-        TimestampUpdate @Nullable [] updates = timestampUpdates(timesAddress);
+        TimestampUpdate @Nullable [] updates = timestampUpdates(timesAddress, nowNanoseconds, omitNanoseconds);
         if (updates == null) {
             return timesAddress == 0 || memory.isBacked(timesAddress, 2L * TIMESPEC_SIZE) ? EINVAL : EFAULT;
         }
@@ -4134,6 +4647,19 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
             return EACCES;
         }
         return updateHostFileTimes(hostFile, accessTime, modificationTime, flags, true);
+    }
+
+    /// Updates an open descriptor's timestamps using ABI-specific nanosecond sentinels.
+    protected long futimens(
+            int fileDescriptor,
+            long timesAddress,
+            long nowNanoseconds,
+            long omitNanoseconds) {
+        TimestampUpdate @Nullable [] updates = timestampUpdates(timesAddress, nowNanoseconds, omitNanoseconds);
+        if (updates == null) {
+            return timesAddress == 0 || memory.isBacked(timesAddress, 2L * TIMESPEC_SIZE) ? EINVAL : EFAULT;
+        }
+        return updateFileDescriptorTimes(fileDescriptor, updates[0], updates[1]);
     }
 
     /// Updates access and modification times for an open descriptor.
@@ -4255,7 +4781,10 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
     }
 
     /// Reads the two `timespec` updates supplied to `utimensat`.
-    private TimestampUpdate @Nullable [] timestampUpdates(long timesAddress) {
+    private TimestampUpdate @Nullable [] timestampUpdates(
+            long timesAddress,
+            long nowNanoseconds,
+            long omitNanoseconds) {
         if (timesAddress == 0) {
             Instant now = timeSource.realtimeInstant();
             return new TimestampUpdate[]{
@@ -4268,8 +4797,16 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
         }
 
         Instant now = timeSource.realtimeInstant();
-        @Nullable TimestampUpdate accessTime = timestampUpdate(timesAddress, now);
-        @Nullable TimestampUpdate modificationTime = timestampUpdate(timesAddress + TIMESPEC_SIZE, now);
+        @Nullable TimestampUpdate accessTime = timestampUpdate(
+                timesAddress,
+                now,
+                nowNanoseconds,
+                omitNanoseconds);
+        @Nullable TimestampUpdate modificationTime = timestampUpdate(
+                timesAddress + TIMESPEC_SIZE,
+                now,
+                nowNanoseconds,
+                omitNanoseconds);
         if (accessTime == null || modificationTime == null) {
             return null;
         }
@@ -4277,13 +4814,17 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
     }
 
     /// Reads one `timespec` timestamp update.
-    private @Nullable TimestampUpdate timestampUpdate(long address, Instant now) {
+    private @Nullable TimestampUpdate timestampUpdate(
+            long address,
+            Instant now,
+            long nowNanoseconds,
+            long omitNanoseconds) {
         long seconds = memory.readLong(address + TIMESPEC_SECONDS_OFFSET);
         long nanoseconds = memory.readLong(address + TIMESPEC_NANOSECONDS_OFFSET);
-        if (nanoseconds == UTIME_OMIT) {
+        if (nanoseconds == omitNanoseconds) {
             return TimestampUpdate.omitted();
         }
-        if (nanoseconds == UTIME_NOW) {
+        if (nanoseconds == nowNanoseconds) {
             return TimestampUpdate.set(FileTime.from(now));
         }
         if (nanoseconds < 0 || nanoseconds >= NANOSECONDS_PER_SECOND) {
@@ -4431,7 +4972,7 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
         try {
             exists = Files.exists(hostFile);
             if (exists && Files.isDirectory(hostFile)) {
-                if (!directoryOnly || writable || truncate || append) {
+                if (writable || truncate || append) {
                     return EISDIR;
                 }
                 GuestFileMetadata metadata = hostFileMetadata(hostFile, true);
@@ -4563,9 +5104,6 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
             return EACCES;
         }
         if (node.isDirectory()) {
-            if (!directoryOnly) {
-                return EISDIR;
-            }
             if (!canAccess(node, X_OK)) {
                 return EACCES;
             }
@@ -4629,9 +5167,6 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
             return EROFS;
         }
         if (node.isDirectory()) {
-            if (!directoryOnly) {
-                return EISDIR;
-            }
             if ((readable && !canAccess(node, R_OK)) || !canAccess(node, X_OK)) {
                 return EACCES;
             }
@@ -4930,6 +5465,9 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
         if (iovecCount < 0 || iovecCount > IOV_MAX) {
             return EINVAL;
         }
+        if (!isBackedIovecArray(iovecAddress, iovecCount)) {
+            return EFAULT;
+        }
         if (inputStreamFor(fileDescriptor) == null) {
             @Nullable OpenFile openFile = openFile(fileDescriptor);
             if (openFile == null || !openFile.readable()) {
@@ -4969,6 +5507,9 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
     protected long writev(int fileDescriptor, long iovecAddress, long iovecCount) {
         if (iovecCount < 0 || iovecCount > IOV_MAX) {
             return EINVAL;
+        }
+        if (!isBackedIovecArray(iovecAddress, iovecCount)) {
+            return EFAULT;
         }
 
         if (outputStreamFor(fileDescriptor) == null) {
@@ -5102,6 +5643,9 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
         if (iovecCount < 0 || iovecCount > IOV_MAX) {
             return EINVAL;
         }
+        if (!isBackedIovecArray(iovecAddress, iovecCount)) {
+            return EFAULT;
+        }
         if (standardFileDescriptorFor(fileDescriptor) >= 0) {
             return ESPIPE;
         }
@@ -5172,6 +5716,9 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
         if (iovecCount < 0 || iovecCount > IOV_MAX) {
             return EINVAL;
         }
+        if (!isBackedIovecArray(iovecAddress, iovecCount)) {
+            return EFAULT;
+        }
         if (standardFileDescriptorFor(fileDescriptor) >= 0) {
             return fileDescriptor == 0 ? EBADF : ESPIPE;
         }
@@ -5222,6 +5769,197 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
             return total;
         } catch (IOException exception) {
             throw new RiscVException("Guest pwritev2 syscall failed", exception);
+        }
+    }
+
+    /// Returns true when a validated-count guest `struct iovec` array can be read completely.
+    protected boolean isBackedIovecArray(long iovecAddress, long iovecCount) {
+        return iovecCount == 0 || memory.isBacked(iovecAddress, iovecCount * IOVEC_SIZE);
+    }
+
+    /// Copies a byte range between regular files using Linux-compatible offset semantics.
+    protected long copyFileRange(
+            int inputFileDescriptor,
+            long inputOffsetAddress,
+            int outputFileDescriptor,
+            long outputOffsetAddress,
+            long length,
+            long flags) {
+        if (flags != 0) {
+            return EINVAL;
+        }
+        if (!isOpenFileDescriptor(inputFileDescriptor)
+                || !isOpenFileDescriptor(outputFileDescriptor)) {
+            return EBADF;
+        }
+
+        long inputStatusFlags = statusFlagsFor(inputFileDescriptor);
+        long outputStatusFlags = statusFlagsFor(outputFileDescriptor);
+        if ((inputStatusFlags & O_ACCMODE) == O_WRONLY
+                || (outputStatusFlags & O_ACCMODE) == O_RDONLY
+                || (outputStatusFlags & O_APPEND) != 0) {
+            return EBADF;
+        }
+
+        @Nullable OpenFile inputFile = openFile(inputFileDescriptor);
+        @Nullable OpenFile outputFile = openFile(outputFileDescriptor);
+        if (inputFile != null && inputFile.isDirectory()
+                || outputFile != null && outputFile.isDirectory()) {
+            return EISDIR;
+        }
+        if (inputFile == null || outputFile == null
+                || !inputFile.isHostFile() || !outputFile.isHostFile()
+                || inputFile.isCharacterDevice() || outputFile.isCharacterDevice()) {
+            return EINVAL;
+        }
+
+        long inputOffset;
+        if (inputOffsetAddress == 0) {
+            try {
+                inputOffset = inputFile.channel().position();
+            } catch (IOException exception) {
+                throw new RiscVException("Guest copy_file_range input offset query failed", exception);
+            }
+        } else {
+            if (!memory.isBacked(inputOffsetAddress, Long.BYTES)) {
+                return EFAULT;
+            }
+            inputOffset = memory.readLong(inputOffsetAddress);
+        }
+
+        long outputOffset;
+        if (outputOffsetAddress == 0) {
+            try {
+                outputOffset = outputFile.channel().position();
+            } catch (IOException exception) {
+                throw new RiscVException("Guest copy_file_range output offset query failed", exception);
+            }
+        } else {
+            if (!memory.isBacked(outputOffsetAddress, Long.BYTES)) {
+                return EFAULT;
+            }
+            outputOffset = memory.readLong(outputOffsetAddress);
+        }
+
+        if (inputOffset < 0 || outputOffset < 0) {
+            return EINVAL;
+        }
+        long requestedLength = length < 0 ? Long.MAX_VALUE : length;
+        if (requestedLength == 0) {
+            return 0;
+        }
+
+        try {
+            boolean sameFile = sameRegularFile(inputFile, outputFile);
+            if (inputFile == outputFile && inputOffsetAddress == 0 && outputOffsetAddress == 0
+                    || sameFile && fileRangesOverlap(inputOffset, outputOffset, requestedLength)) {
+                return EINVAL;
+            }
+
+            byte[] buffer = new byte[(int) Math.min(requestedLength, FILE_COPY_BUFFER_SIZE)];
+            long total = 0;
+            while (total < requestedLength) {
+                int requested = (int) Math.min(buffer.length, requestedLength - total);
+                ByteBuffer inputBuffer = ByteBuffer.wrap(buffer, 0, requested);
+                int readCount = inputOffsetAddress == 0
+                        ? inputFile.channel().read(inputBuffer)
+                        : readHostFileAt(inputFile.channel(), inputOffset, inputBuffer);
+                if (readCount <= 0) {
+                    return total;
+                }
+
+                long written = writeCopyFileRangeChunk(
+                        outputFile,
+                        outputOffsetAddress,
+                        outputOffset,
+                        buffer,
+                        readCount);
+                if (written <= 0) {
+                    return total;
+                }
+
+                total += written;
+                if (inputOffsetAddress != 0) {
+                    inputOffset = addFileOffset(inputOffset, written);
+                    if (inputOffset < 0) {
+                        return total == written ? EOVERFLOW : total;
+                    }
+                    memory.writeLong(inputOffsetAddress, inputOffset);
+                }
+                if (outputOffsetAddress != 0) {
+                    outputOffset = addFileOffset(outputOffset, written);
+                    if (outputOffset < 0) {
+                        return total == written ? EOVERFLOW : total;
+                    }
+                    memory.writeLong(outputOffsetAddress, outputOffset);
+                }
+                if (written < readCount || readCount < requested) {
+                    return total;
+                }
+            }
+            return total;
+        } catch (IOException exception) {
+            throw new RiscVException("Guest copy_file_range syscall failed", exception);
+        }
+    }
+
+    /// Returns true when two open regular-file descriptions refer to the same underlying file.
+    protected static boolean sameRegularFile(OpenFile first, OpenFile second) throws IOException {
+        if (first == second) {
+            return true;
+        }
+        @Nullable Path firstPath = first.path();
+        @Nullable Path secondPath = second.path();
+        if (firstPath != null && secondPath != null) {
+            return Files.isSameFile(firstPath, secondPath);
+        }
+        if (first.tarNode() != null && first.tarNode() == second.tarNode()) {
+            return true;
+        }
+        return first.virtualNode() != null
+                && first.virtualNode() == second.virtualNode()
+                && first.virtualMount() == second.virtualMount();
+    }
+
+    /// Returns true when two nonnegative, equal-length file ranges overlap.
+    protected static boolean fileRangesOverlap(long firstOffset, long secondOffset, long length) {
+        return firstOffset <= secondOffset
+                ? secondOffset - firstOffset < length
+                : firstOffset - secondOffset < length;
+    }
+
+    /// Adds a copied byte count to a nonnegative file offset, returning `-1` on overflow.
+    protected static long addFileOffset(long offset, long count) {
+        return offset > Long.MAX_VALUE - count ? -1 : offset + count;
+    }
+
+    /// Writes one copied chunk at either the current or an explicitly supplied output offset.
+    protected static long writeCopyFileRangeChunk(
+            OpenFile outputFile,
+            long outputOffsetAddress,
+            long outputOffset,
+            byte[] buffer,
+            int length) throws IOException {
+        SeekableByteChannel channel = outputFile.channel();
+        long originalPosition = channel.position();
+        try {
+            if (outputOffsetAddress != 0) {
+                channel.position(outputOffset);
+            }
+            ByteBuffer outputBuffer = ByteBuffer.wrap(buffer, 0, length);
+            long written = 0;
+            while (outputBuffer.hasRemaining()) {
+                int count = channel.write(outputBuffer);
+                if (count <= 0) {
+                    return written;
+                }
+                written += count;
+            }
+            return written;
+        } finally {
+            if (outputOffsetAddress != 0) {
+                channel.position(originalPosition);
+            }
         }
     }
 
@@ -5668,6 +6406,13 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
         if (openFile == null) {
             return EPOLLHUP;
         }
+        if (openFile.isProcessFile()) {
+            ProcessFile processFile = openFile.processFile();
+            if (!processFile.exited()) {
+                return 0;
+            }
+            return processFile.reaped() ? EPOLLIN | EPOLLHUP : EPOLLIN;
+        }
         if (openFile.isEventFile()) {
             EventCounter counter = openFile.eventCounter();
             int events = 0;
@@ -5769,16 +6514,21 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
     /// Handles `close` for standard streams and guest-opened file descriptors.
     protected long close(int fileDescriptor) {
         if (isStandardFileDescriptor(fileDescriptor)) {
+            if (!standardFileOpen[fileDescriptor]) {
+                return EBADF;
+            }
             @Nullable OpenFile openFile = standardFiles[fileDescriptor];
-            if (openFile != null) {
-                try {
-                    standardFiles[fileDescriptor] = null;
-                    standardFileCloseOnExec[fileDescriptor] = false;
+            try {
+                standardFiles[fileDescriptor] = null;
+                standardFileOpen[fileDescriptor] = false;
+                standardFileCloseOnExec[fileDescriptor] = false;
+                setFileDescriptorCloseOnFork(fileDescriptor, false);
+                if (openFile != null) {
                     releaseOpenFile(openFile);
-                    notifyPollWaiters();
-                } catch (IOException exception) {
-                    throw new RiscVException("Guest close syscall failed", exception);
                 }
+                notifyPollWaiters();
+            } catch (IOException exception) {
+                throw new RiscVException("Guest close syscall failed", exception);
             }
             return 0;
         }
@@ -5796,6 +6546,7 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
         try {
             openFiles.set(index, null);
             setOpenFileCloseOnExec(index, false);
+            setFileDescriptorCloseOnFork(fileDescriptor, false);
             releaseOpenFile(openFile);
             notifyPollWaiters();
             return 0;
@@ -5806,31 +6557,47 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
 
     /// Handles Linux `close_range` for open descriptors in the current descriptor table.
     protected long closeRange(long firstFileDescriptor, long lastFileDescriptor, long flags) {
+        return closeRange(firstFileDescriptor, lastFileDescriptor, flags, SUPPORTED_CLOSE_RANGE_FLAGS);
+    }
+
+    /// Handles a descriptor range with an ABI-specific set of accepted flags.
+    protected long closeRange(
+            long firstFileDescriptor,
+            long lastFileDescriptor,
+            long flags,
+            long supportedFlags) {
         long first = unsignedIntArgument(firstFileDescriptor);
         long last = unsignedIntArgument(lastFileDescriptor);
-        if (first < 0 || last < 0 || first > last || (flags & ~SUPPORTED_CLOSE_RANGE_FLAGS) != 0) {
+        if (first < 0 || last < 0 || first > last || (flags & ~supportedFlags) != 0) {
             return EINVAL;
         }
 
         boolean closeOnExec = (flags & CLOSE_RANGE_CLOEXEC) != 0;
+        boolean closeOnFork = (flags & CLOSE_RANGE_CLOFORK) != 0;
         boolean closedAny = false;
         try {
             for (int fileDescriptor = 0; fileDescriptor < standardFiles.length; fileDescriptor++) {
-                if (fileDescriptor < first || fileDescriptor > last) {
+                if (fileDescriptor < first || fileDescriptor > last || !standardFileOpen[fileDescriptor]) {
                     continue;
                 }
-                if (closeOnExec) {
-                    standardFileCloseOnExec[fileDescriptor] = true;
+                if (closeOnExec || closeOnFork) {
+                    if (closeOnExec) {
+                        standardFileCloseOnExec[fileDescriptor] = true;
+                    }
+                    if (closeOnFork) {
+                        setFileDescriptorCloseOnFork(fileDescriptor, true);
+                    }
                     continue;
                 }
 
                 @Nullable OpenFile openFile = standardFiles[fileDescriptor];
-                if (openFile == null) {
-                    continue;
-                }
                 standardFiles[fileDescriptor] = null;
+                standardFileOpen[fileDescriptor] = false;
                 standardFileCloseOnExec[fileDescriptor] = false;
-                releaseOpenFile(openFile);
+                setFileDescriptorCloseOnFork(fileDescriptor, false);
+                if (openFile != null) {
+                    releaseOpenFile(openFile);
+                }
                 closedAny = true;
             }
 
@@ -5839,17 +6606,23 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
                 if (fileDescriptor < first || fileDescriptor > last) {
                     continue;
                 }
-                if (closeOnExec) {
-                    setOpenFileCloseOnExec(index, true);
-                    continue;
-                }
-
                 @Nullable OpenFile openFile = openFiles.get(index);
                 if (openFile == null) {
                     continue;
                 }
+                if (closeOnExec || closeOnFork) {
+                    if (closeOnExec) {
+                        setOpenFileCloseOnExec(index, true);
+                    }
+                    if (closeOnFork) {
+                        setFileDescriptorCloseOnFork((int) fileDescriptor, true);
+                    }
+                    continue;
+                }
+
                 openFiles.set(index, null);
                 setOpenFileCloseOnExec(index, false);
+                setFileDescriptorCloseOnFork((int) fileDescriptor, false);
                 releaseOpenFile(openFile);
                 closedAny = true;
             }
@@ -5981,14 +6754,11 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
         }
 
         try {
-            if (!Files.exists(hostFile)) {
+            if (!pathEntryExists(hostFile)) {
                 return ENOENT;
             }
             if (!Files.isSymbolicLink(hostFile)) {
                 return EINVAL;
-            }
-            if (!canonicalFileStaysBelowMount(hostFile)) {
-                return EACCES;
             }
             long parentAccess = accessHostParent(hostFile);
             if (parentAccess != 0) {
@@ -6147,7 +6917,7 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
         if (hostFile == null) {
             return EACCES;
         }
-        return statHostFile(hostFile, statAddress, true);
+        return statHostFile(hostFile, statAddress, true, flags);
     }
 
     /// Writes a minimal Linux generic 64-bit `struct stat` for a file descriptor.
@@ -6480,18 +7250,34 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
 
     /// Writes a minimal Linux generic 64-bit `struct stat` for a sandboxed host file.
     protected long statHostFile(Path hostFile, long statAddress, boolean requireParentSearch) {
+        return statHostFile(hostFile, statAddress, requireParentSearch, 0);
+    }
+
+    /// Writes a minimal Linux generic 64-bit `struct stat` for a sandboxed host path with `*at` flags.
+    protected long statHostFile(Path hostFile, long statAddress, boolean requireParentSearch, long flags) {
         try {
-            if (!Files.exists(hostFile)) {
+            boolean noFollow = (flags & AT_SYMLINK_NOFOLLOW) != 0;
+            if (noFollow ? !pathEntryExists(hostFile) : !Files.exists(hostFile)) {
                 return ENOENT;
-            }
-            if (!canonicalFileStaysBelowMount(hostFile)) {
-                return EACCES;
             }
             if (requireParentSearch) {
                 long parentAccess = accessHostParent(hostFile);
                 if (parentAccess != 0) {
                     return parentAccess;
                 }
+            }
+            if (noFollow && Files.isSymbolicLink(hostFile)) {
+                String target = Files.readSymbolicLink(hostFile).toString();
+                writeStat(
+                        statAddress,
+                        syntheticInode(hostFile),
+                        STAT_MODE_SYMBOLIC_LINK | STAT_MODE_ALL,
+                        target.getBytes(StandardCharsets.UTF_8).length);
+                writeHostStatTimestamps(hostFile, statAddress, true);
+                return 0;
+            }
+            if (!canonicalFileStaysBelowMount(hostFile)) {
+                return EACCES;
             }
 
             if (Files.isDirectory(hostFile)) {
@@ -6503,6 +7289,7 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
                         0,
                         metadata.userId(),
                         metadata.groupId());
+                writeHostStatTimestamps(hostFile, statAddress, false);
                 return 0;
             }
             if (Files.isRegularFile(hostFile)) {
@@ -6515,6 +7302,7 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
                         size,
                         metadata.userId(),
                         metadata.groupId());
+                writeHostStatTimestamps(hostFile, statAddress, false);
                 return 0;
             }
             return ENODEV;
@@ -6736,6 +7524,40 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
         memory.writeLong(statAddress + STAT_SIZE_OFFSET, size);
         memory.writeInt(statAddress + STAT_BLOCK_SIZE_OFFSET, STANDARD_STREAM_BLOCK_SIZE);
         memory.writeLong(statAddress + STAT_BLOCK_COUNT_OFFSET, (size + 511L) / 512L);
+    }
+
+    /// Writes host timestamps into the active ABI's `struct stat` layout.
+    protected void writeStatTimestamps(
+            long statAddress,
+            FileTime accessTime,
+            FileTime modificationTime,
+            @Nullable FileTime changeTime,
+            @Nullable FileTime birthTime) {
+        writeFileTime(statAddress + STAT_ACCESS_TIME_OFFSET, accessTime);
+        writeFileTime(statAddress + STAT_MODIFICATION_TIME_OFFSET, modificationTime);
+        if (changeTime != null) {
+            writeFileTime(statAddress + STAT_CHANGE_TIME_OFFSET, changeTime);
+        }
+    }
+
+    /// Reads host timestamps and writes them without following the final symbolic link when requested.
+    private void writeHostStatTimestamps(Path hostFile, long statAddress, boolean noFollow) throws IOException {
+        BasicFileAttributes attributes = noFollow
+                ? Files.readAttributes(hostFile, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS)
+                : Files.readAttributes(hostFile, BasicFileAttributes.class);
+        writeStatTimestamps(
+                statAddress,
+                attributes.lastAccessTime(),
+                attributes.lastModifiedTime(),
+                null,
+                attributes.creationTime());
+    }
+
+    /// Writes one Java file timestamp as a native 64-bit `struct timespec`.
+    protected void writeFileTime(long address, FileTime fileTime) {
+        Instant instant = fileTime.toInstant();
+        memory.writeLong(address + TIMESPEC_SECONDS_OFFSET, instant.getEpochSecond());
+        memory.writeLong(address + TIMESPEC_NANOSECONDS_OFFSET, instant.getNano());
     }
 
     /// Writes deterministic Linux generic `struct statx` fields.
@@ -7128,7 +7950,7 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
         }
         if (command == F_SETFL) {
             @Nullable OpenFile openFile = openFile(fileDescriptor);
-            if (openFile == null && isStandardFileDescriptor(fileDescriptor)) {
+            if (openFile == null && isStandardFileDescriptor(fileDescriptor) && standardFileOpen[fileDescriptor]) {
                 openFile = OpenFile.standardFileDescriptor(fileDescriptor);
                 standardFiles[fileDescriptor] = openFile;
             }
@@ -7191,6 +8013,7 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
     /// Records a guest thread exit and performs Linux clear-child-TID wakeup side effects.
     public void recordThreadExit(RiscVThreadState state, long exitCode) {
         synchronized (threadLock) {
+            state.guestThread().markExited();
             clearChildTidAndWake(state);
             if (liveThreadCount > 0) {
                 liveThreadCount--;
@@ -7203,6 +8026,7 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
                 processStatusPollingRequired = true;
             }
             notifyParentProcessExitLocked();
+            notifyPollWaiters();
             threadLock.notifyAll();
         }
     }
@@ -7446,6 +8270,19 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
                 return EINVAL;
             }
             timeoutNanos = futexTimeoutNanos(seconds, nanoseconds, absoluteTimeout, realtimeTimeout);
+        }
+
+        return futexWaitWithTimeoutNanos(address, expectedValue, bitset, timeoutNanos);
+    }
+
+    /// Handles a futex wait after the caller has converted any timeout to a relative nanosecond count.
+    protected long futexWaitWithTimeoutNanos(
+            long address,
+            long expectedValue,
+            long bitset,
+            long timeoutNanos) {
+        if ((bitset & 0xffff_ffffL) == 0 || timeoutNanos < -1) {
+            return EINVAL;
         }
 
         synchronized (threadLock) {
@@ -7727,6 +8564,11 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
                 loadedProcess.stackPointer(),
                 program.executable().runtimeOptionalAddress(program.executable().image().tohostAddress()),
                 program.executable().runtimeOptionalAddress(program.executable().image().fromhostAddress()));
+        initializeExecEntryState(state, loadedProcess.stackPointer());
+    }
+
+    /// Applies ABI-specific register values required at a newly executed program's entry point.
+    protected void initializeExecEntryState(RiscVThreadState state, long stackPointer) {
     }
 
     /// Resets syscall-owned process metadata after a successful `execve`.
@@ -7754,14 +8596,15 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
             }
             standardFileCloseOnExec[index] = false;
             @Nullable OpenFile openFile = standardFiles[index];
-            if (openFile == null) {
-                continue;
-            }
             standardFiles[index] = null;
-            try {
-                releaseOpenFile(openFile);
-            } catch (IOException exception) {
-                throw new RiscVException("Guest execve close-on-exec failed", exception);
+            standardFileOpen[index] = false;
+            setFileDescriptorCloseOnFork(index, false);
+            if (openFile != null) {
+                try {
+                    releaseOpenFile(openFile);
+                } catch (IOException exception) {
+                    throw new RiscVException("Guest execve close-on-exec failed", exception);
+                }
             }
         }
 
@@ -7775,6 +8618,7 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
                 continue;
             }
             openFiles.set(index, null);
+            setFileDescriptorCloseOnFork(index + 3, false);
             try {
                 releaseOpenFile(openFile);
             } catch (IOException exception) {
@@ -7921,7 +8765,7 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
         return timespecToSaturatedNanoseconds(seconds, nanoseconds);
     }
 
-    /// Yields the host thread for the Linux `sched_yield` syscall.
+    /// Yields the host thread for a guest scheduling-yield syscall.
     protected static long schedYield() {
         Thread.yield();
         return 0;
@@ -8030,6 +8874,156 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
         };
     }
 
+    /// Applies Linux `setpriority` target selection and partial-update error retention.
+    protected long setLinuxProcessPriority(long which, long who, long priority) {
+        return setProcessPriority(which, who, priority, false, true);
+    }
+
+    /// Applies FreeBSD `setpriority` target selection and last-target error reporting.
+    protected long setFreeBsdProcessPriority(long which, long who, long priority) {
+        return setProcessPriority(which, who, priority, true, false);
+    }
+
+    /// Returns the lowest nice value selected by Linux `getpriority`.
+    protected PriorityResult linuxProcessPriority(long which, long who) {
+        return processPriority(which, who, false);
+    }
+
+    /// Returns the lowest nice value selected by FreeBSD `getpriority`.
+    protected PriorityResult freeBsdProcessPriority(long which, long who) {
+        return processPriority(which, who, true);
+    }
+
+    /// Applies one ABI's priority target selection, clamping, permissions, and multi-target error rule.
+    private long setProcessPriority(
+            long whichArgument,
+            long whoArgument,
+            long priorityArgument,
+            boolean selectEffectiveUserId,
+            boolean retainPreviousFailure) {
+        int which = (int) whichArgument;
+        if (which < PRIO_PROCESS || which > PRIO_USER) {
+            return EINVAL;
+        }
+
+        int requestedNiceValue = (int) priorityArgument;
+        int niceValue = Math.max(NICE_MINIMUM, Math.min(NICE_MAXIMUM, requestedNiceValue));
+        ArrayList<GuestSyscalls> targets = processPriorityTargets(which, (int) whoArgument, selectEffectiveUserId);
+        if (targets.isEmpty()) {
+            return ESRCH;
+        }
+
+        long error = ESRCH;
+        for (GuestSyscalls target : targets) {
+            long targetError = setOneProcessPriority(target, niceValue);
+            if (targetError != 0) {
+                error = targetError;
+            } else if (!retainPreviousFailure || error == ESRCH) {
+                error = 0;
+            }
+        }
+        return error;
+    }
+
+    /// Returns one ABI's lowest selected nice value without conflating negative values with errno results.
+    private PriorityResult processPriority(long whichArgument, long whoArgument, boolean selectEffectiveUserId) {
+        int which = (int) whichArgument;
+        if (which < PRIO_PROCESS || which > PRIO_USER) {
+            return new PriorityResult(0, EINVAL);
+        }
+
+        ArrayList<GuestSyscalls> targets = processPriorityTargets(which, (int) whoArgument, selectEffectiveUserId);
+        if (targets.isEmpty()) {
+            return new PriorityResult(0, ESRCH);
+        }
+
+        int niceValue = NICE_MAXIMUM;
+        for (GuestSyscalls target : targets) {
+            niceValue = Math.min(niceValue, target.process.niceValue());
+        }
+        return new PriorityResult(niceValue, 0);
+    }
+
+    /// Returns the current process and live direct children selected by one priority request.
+    private ArrayList<GuestSyscalls> processPriorityTargets(
+            int which,
+            int who,
+            boolean selectEffectiveUserId) {
+        ArrayList<GuestSyscalls> targets = new ArrayList<>();
+        if (which == PRIO_PROCESS) {
+            if (who == 0 || who == process.id()) {
+                targets.add(this);
+                return targets;
+            }
+            synchronized (childProcessLock) {
+                @Nullable ChildProcess child = childProcess(who);
+                if (child != null && !child.exited()) {
+                    targets.add(child.syscalls());
+                }
+            }
+            return targets;
+        }
+
+        if (which == PRIO_PROCESS_GROUP) {
+            int processGroupId = who == 0 ? process.processGroupId() : who;
+            if (processGroupId <= 0) {
+                return targets;
+            }
+            if (process.processGroupId() == processGroupId) {
+                targets.add(this);
+            }
+            synchronized (childProcessLock) {
+                for (ChildProcess child : childProcesses) {
+                    if (!child.exited() && child.processGroupId() == processGroupId) {
+                        targets.add(child.syscalls());
+                    }
+                }
+            }
+            return targets;
+        }
+
+        long userId = who == 0
+                ? processPriorityUserId(this, selectEffectiveUserId)
+                : Integer.toUnsignedLong(who);
+        if (processPriorityUserId(this, selectEffectiveUserId) == userId) {
+            targets.add(this);
+        }
+        synchronized (childProcessLock) {
+            for (ChildProcess child : childProcesses) {
+                GuestSyscalls childSyscalls = child.syscalls();
+                if (!child.exited() && processPriorityUserId(childSyscalls, selectEffectiveUserId) == userId) {
+                    targets.add(childSyscalls);
+                }
+            }
+        }
+        return targets;
+    }
+
+    /// Returns the real or effective user id used by one ABI's `PRIO_USER` selector.
+    private static long processPriorityUserId(GuestSyscalls target, boolean selectEffectiveUserId) {
+        return selectEffectiveUserId
+                ? target.credentials.effectiveUserId()
+                : target.credentials.realUserId();
+    }
+
+    /// Updates one target nice value after ownership and privilege checks.
+    private long setOneProcessPriority(GuestSyscalls target, int niceValue) {
+        long effectiveUserId = credentials.effectiveUserId();
+        if (effectiveUserId != 0
+                && effectiveUserId != target.credentials.realUserId()
+                && effectiveUserId != target.credentials.effectiveUserId()) {
+            return EPERM;
+        }
+
+        synchronized (target.process) {
+            if (niceValue < target.process.niceValue() && effectiveUserId != 0) {
+                return EACCES;
+            }
+            target.process.setNiceValue(niceValue);
+        }
+        return 0;
+    }
+
     /// Accepts signal sends that target known guest processes.
     protected long kill(long processId, long signalNumber) {
         if (!isValidSignalNumber(signalNumber)) {
@@ -8045,40 +9039,54 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
         return ESRCH;
     }
 
-    /// Updates the target process group when the target process and group are known to this runtime.
+    /// Updates a current or direct-child process group under POSIX session constraints.
     protected long setpgid(long processId, long processGroupId) {
-        if (processId < 0
-                || processId != (int) processId
-                || processGroupId < 0
-                || processGroupId != (int) processGroupId) {
+        int requestedProcessId = (int) processId;
+        int requestedProcessGroupId = (int) processGroupId;
+        if (requestedProcessGroupId < 0) {
             return EINVAL;
         }
+        if (requestedProcessId < 0) {
+            return ESRCH;
+        }
 
-        int targetProcessId = processId == 0 ? process.id() : (int) processId;
-        int targetProcessGroupId = processGroupId == 0 ? targetProcessId : (int) processGroupId;
+        int targetProcessId = requestedProcessId == 0 ? process.id() : requestedProcessId;
+        int targetProcessGroupId = requestedProcessGroupId == 0 ? targetProcessId : requestedProcessGroupId;
         if (targetProcessGroupId <= 0) {
             return EINVAL;
         }
 
         synchronized (childProcessLock) {
+            GuestProcess targetProcess;
+            @Nullable ChildProcess child;
             if (targetProcessId == process.id()) {
-                if (!isKnownOrSelfProcessGroupId(targetProcessGroupId) && targetProcessGroupId != targetProcessId) {
-                    return EPERM;
+                targetProcess = process;
+                child = null;
+            } else {
+                child = childProcess(targetProcessId);
+                if (child == null || child.exited()) {
+                    return ESRCH;
                 }
-                process.setProcessGroupId(targetProcessGroupId);
-                updateParentChildProcessGroup(targetProcessGroupId);
-                return 0;
+                targetProcess = child.syscalls().process;
             }
 
-            @Nullable ChildProcess child = childProcess(targetProcessId);
-            if (child == null) {
-                return ESRCH;
-            }
-            if (!isKnownOrSelfProcessGroupId(targetProcessGroupId) && targetProcessGroupId != targetProcessId) {
+            GuestSession currentSession = process.session();
+            if (targetProcess.session() != currentSession || targetProcess.isSessionLeader()) {
                 return EPERM;
             }
-            child.setProcessGroupId(targetProcessGroupId);
-            child.syscalls().process.setProcessGroupId(targetProcessGroupId);
+
+            @Nullable GuestSession targetGroupSession = knownProcessGroupSession(targetProcessGroupId);
+            if (targetGroupSession == null && targetProcessGroupId != targetProcessId
+                    || targetGroupSession != null && targetGroupSession != currentSession) {
+                return EPERM;
+            }
+
+            targetProcess.setProcessGroupId(targetProcessGroupId);
+            if (child == null) {
+                updateParentChildProcessGroup(targetProcessGroupId);
+            } else {
+                child.setProcessGroupId(targetProcessGroupId);
+            }
             return 0;
         }
     }
@@ -8096,22 +9104,36 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
         }
     }
 
-    /// Returns true when a process group id names the current process group or a tracked child group.
-    protected boolean isKnownOrSelfProcessGroupId(int processGroupId) {
+    /// Returns the session containing a known process group, or null when the group is not represented.
+    protected @Nullable GuestSession knownProcessGroupSession(int processGroupId) {
         if (process.processGroupId() == processGroupId) {
-            return true;
+            return process.session();
         }
-        for (ChildProcess child : childProcesses) {
-            if (child.processGroupId() == processGroupId) {
-                return true;
+        synchronized (childProcessLock) {
+            for (ChildProcess child : childProcesses) {
+                if (!child.exited() && child.processGroupId() == processGroupId) {
+                    return child.syscalls().process.session();
+                }
             }
         }
-        return false;
+        return parentProcess == null ? null : parentProcess.knownProcessGroupSession(processGroupId);
     }
 
-    /// Accepts session creation as a deterministic no-op for the current guest process.
+    /// Returns true when a process group id names a represented live process group.
+    protected boolean isKnownOrSelfProcessGroupId(int processGroupId) {
+        return knownProcessGroupSession(processGroupId) != null;
+    }
+
+    /// Creates a new session and process group unless this process already leads a process group.
     protected long setsid() {
-        return process.processGroupId();
+        synchronized (process) {
+            if (process.isProcessGroupLeader() || knownProcessGroupSession(process.id()) != null) {
+                return EPERM;
+            }
+            process.startNewSession();
+        }
+        updateParentChildProcessGroup(process.id());
+        return process.id();
     }
 
     /// Returns true when a signal number is zero or a regular Linux signal.
@@ -8168,51 +9190,41 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
     }
 
     /// Waits for an exited child process and reports its Linux wait status.
-    protected long wait4(long processId, long statusAddress, long options, long rusageAddress) {
-        if ((options & ~SUPPORTED_WAIT_OPTIONS) != 0) {
+    protected long wait4(
+            RiscVThreadState state,
+            long processId,
+            long statusAddress,
+            long options,
+            long rusageAddress) {
+        long normalizedOptions = Integer.toUnsignedLong((int) options);
+        if ((normalizedOptions & ~SUPPORTED_WAIT_OPTIONS) != 0) {
             return EINVAL;
         }
+        if (statusAddress != 0 && !memory.isBacked(statusAddress, Integer.BYTES)) {
+            return EFAULT;
+        }
+        if (rusageAddress != 0 && !memory.isBacked(rusageAddress, RUSAGE_SIZE)) {
+            return EFAULT;
+        }
+        boolean waitForAllChildren = (normalizedOptions & WAIT_ALL_CHILDREN) != 0;
+        boolean waitForCloneChildren = (normalizedOptions & WAIT_CLONE_CHILDREN) != 0;
 
-        @Nullable ChildProcess exitedChild = null;
-        while (true) {
-            synchronized (childProcessLock) {
-                if (processExitRequested || threadFailure != null) {
-                    return EINTR;
-                }
-                boolean hasMatchingChild = false;
-                for (int index = 0; index < childProcesses.size(); index++) {
-                    ChildProcess child = childProcesses.get(index);
-                    if (!child.matches(processId)) {
-                        continue;
-                    }
-                    hasMatchingChild = true;
-                    if (child.exited()) {
-                        exitedChild = child;
-                        childProcesses.remove(index);
-                        break;
-                    }
-                }
-
-                if (exitedChild == null && hasMatchingChild) {
-                    if ((options & WAIT_NO_HANG) != 0) {
-                        return 0;
-                    }
-                    try {
-                        childProcessLock.wait();
-                    } catch (InterruptedException exception) {
-                        Thread.currentThread().interrupt();
-                        return EINTR;
-                    }
-                    continue;
-                }
-                if (!hasMatchingChild) {
-                    return ECHILD;
-                }
-                break;
-            }
+        ChildWaitResult waitResult = waitForExitedChild(
+                (int) processId,
+                true,
+                (normalizedOptions & WAIT_NO_HANG) != 0,
+                false,
+                waitForAllChildren || !waitForCloneChildren,
+                waitForAllChildren || waitForCloneChildren,
+                (normalizedOptions & WAIT_NOT_THREAD) != 0 ? state.guestThread().id() : 0);
+        if (waitResult.result() <= 0) {
+            return waitResult.result();
         }
 
-        joinChildProcess(exitedChild);
+        @Nullable ChildProcess exitedChild = waitResult.child();
+        if (exitedChild == null) {
+            throw new AssertionError("Successful child wait did not return a child process");
+        }
         if (statusAddress != 0) {
             memory.writeInt(statusAddress, exitedChild.waitStatus());
         }
@@ -8220,6 +9232,81 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
             memory.clear(rusageAddress, RUSAGE_SIZE);
         }
         return exitedChild.processId();
+    }
+
+    /// Waits for a matching child exit, optionally observing it without consuming its wait status.
+    ///
+    /// @param processId the child id, `-1` for any child, zero for the current process group, or a negated group id
+    /// @param reportExited whether normal child exits are reportable events
+    /// @param noHang whether to return zero instead of blocking while a matching child is still running
+    /// @param preserveWaitStatus whether to leave a reported child waitable by a later call
+    /// @param includeNormalChildren whether children using `SIGCHLD` selection are eligible
+    /// @param includeCloneChildren whether clone children using another exit signal are eligible
+    /// @param parentThreadId the required creator thread id, or zero to accept children from any thread
+    /// @return the wait result and the observed child when one was reported
+    protected ChildWaitResult waitForExitedChild(
+            long processId,
+            boolean reportExited,
+            boolean noHang,
+            boolean preserveWaitStatus,
+            boolean includeNormalChildren,
+            boolean includeCloneChildren,
+            int parentThreadId) {
+        @Nullable ChildProcess exitedChild = null;
+        while (true) {
+            synchronized (childProcessLock) {
+                if (processExitRequested || threadFailure != null) {
+                    return new ChildWaitResult(EINTR, null);
+                }
+                boolean hasMatchingChild = false;
+                for (int index = 0; index < childProcesses.size(); index++) {
+                    ChildProcess child = childProcesses.get(index);
+                    if (!child.matches(processId, process.processGroupId())) {
+                        continue;
+                    }
+                    if (child.cloneChild() ? !includeCloneChildren : !includeNormalChildren) {
+                        continue;
+                    }
+                    if (parentThreadId != 0 && child.parentThreadId() != parentThreadId) {
+                        continue;
+                    }
+                    if (child.exited()) {
+                        if (reportExited) {
+                            hasMatchingChild = true;
+                            exitedChild = child;
+                            if (!preserveWaitStatus) {
+                                childProcesses.remove(index);
+                                child.markReaped();
+                                notifyPollWaiters();
+                            }
+                            break;
+                        }
+                        continue;
+                    }
+                    hasMatchingChild = true;
+                }
+
+                if (exitedChild == null && hasMatchingChild) {
+                    if (noHang) {
+                        return new ChildWaitResult(0, null);
+                    }
+                    try {
+                        childProcessLock.wait();
+                    } catch (InterruptedException exception) {
+                        Thread.currentThread().interrupt();
+                        return new ChildWaitResult(EINTR, null);
+                    }
+                    continue;
+                }
+                if (!hasMatchingChild) {
+                    return new ChildWaitResult(ECHILD, null);
+                }
+                break;
+            }
+        }
+
+        joinChildProcess(exitedChild);
+        return new ChildWaitResult(exitedChild.processId(), exitedChild);
     }
 
     /// Reports the simulated single CPU and NUMA node.
@@ -10199,17 +11286,31 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
 
     /// Adds an open file description to the guest descriptor table.
     protected long addOpenFile(OpenFile openFile, boolean closeOnExec) {
+        for (int fileDescriptor = 0; fileDescriptor < standardFiles.length; fileDescriptor++) {
+            if (standardFileOpen[fileDescriptor]) {
+                continue;
+            }
+            standardFiles[fileDescriptor] = openFile;
+            standardFileOpen[fileDescriptor] = true;
+            standardFileCloseOnExec[fileDescriptor] = closeOnExec;
+            setFileDescriptorCloseOnFork(fileDescriptor, false);
+            return fileDescriptor;
+        }
         for (int index = 0; index < openFiles.size(); index++) {
             if (openFiles.get(index) == null) {
                 openFiles.set(index, openFile);
                 setOpenFileCloseOnExec(index, closeOnExec);
-                return index + 3L;
+                int fileDescriptor = index + 3;
+                setFileDescriptorCloseOnFork(fileDescriptor, false);
+                return fileDescriptor;
             }
         }
 
         openFiles.add(openFile);
         openFileCloseOnExecFlags.add(closeOnExec);
-        return openFiles.size() + 2L;
+        int fileDescriptor = openFiles.size() + 2;
+        setFileDescriptorCloseOnFork(fileDescriptor, false);
+        return fileDescriptor;
     }
 
     /// Adds an open file description to the lowest guest descriptor no lower than the requested minimum.
@@ -10219,12 +11320,26 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
 
     /// Adds an open file description to the lowest guest descriptor no lower than the requested minimum.
     protected long addOpenFileAtLeast(OpenFile openFile, int minimumFileDescriptor, boolean closeOnExec) {
+        for (int fileDescriptor = Math.max(0, minimumFileDescriptor);
+             fileDescriptor < standardFiles.length;
+             fileDescriptor++) {
+            if (standardFileOpen[fileDescriptor]) {
+                continue;
+            }
+            standardFiles[fileDescriptor] = openFile;
+            standardFileOpen[fileDescriptor] = true;
+            standardFileCloseOnExec[fileDescriptor] = closeOnExec;
+            setFileDescriptorCloseOnFork(fileDescriptor, false);
+            return fileDescriptor;
+        }
         int startIndex = Math.max(0, openFileIndex(minimumFileDescriptor));
         for (int index = startIndex; index < openFiles.size(); index++) {
             if (openFiles.get(index) == null) {
                 openFiles.set(index, openFile);
                 setOpenFileCloseOnExec(index, closeOnExec);
-                return index + 3L;
+                int fileDescriptor = index + 3;
+                setFileDescriptorCloseOnFork(fileDescriptor, false);
+                return fileDescriptor;
             }
         }
 
@@ -10234,7 +11349,9 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
         }
         openFiles.add(openFile);
         openFileCloseOnExecFlags.add(closeOnExec);
-        return openFiles.size() + 2L;
+        int fileDescriptor = openFiles.size() + 2;
+        setFileDescriptorCloseOnFork(fileDescriptor, false);
+        return fileDescriptor;
     }
 
     /// Stores an open file description at an explicit non-standard descriptor.
@@ -10251,6 +11368,7 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
         }
         setOpenFile(fileDescriptor, openFile);
         setFileDescriptorCloseOnExec(fileDescriptor, closeOnExec);
+        setFileDescriptorCloseOnFork(fileDescriptor, false);
         notifyPollWaiters();
     }
 
@@ -10258,8 +11376,10 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
     protected void setOpenFile(int fileDescriptor, @Nullable OpenFile openFile) {
         if (isStandardFileDescriptor(fileDescriptor)) {
             standardFiles[fileDescriptor] = openFile;
+            standardFileOpen[fileDescriptor] = openFile != null;
             if (openFile == null) {
                 standardFileCloseOnExec[fileDescriptor] = false;
+                setFileDescriptorCloseOnFork(fileDescriptor, false);
             }
             return;
         }
@@ -10272,6 +11392,7 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
         openFiles.set(index, openFile);
         if (openFile == null) {
             setOpenFileCloseOnExec(index, false);
+            setFileDescriptorCloseOnFork(fileDescriptor, false);
         }
     }
 
@@ -10308,14 +11429,34 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
         openFileCloseOnExecFlags.set(index, closeOnExec);
     }
 
+    /// Returns true when a descriptor has the FreeBSD `FD_CLOFORK` flag set.
+    protected boolean fileDescriptorCloseOnFork(int fileDescriptor) {
+        return fileDescriptorsCloseOnFork.contains(fileDescriptor);
+    }
+
+    /// Updates whether a descriptor has the FreeBSD `FD_CLOFORK` flag set.
+    protected void setFileDescriptorCloseOnFork(int fileDescriptor, boolean closeOnFork) {
+        if (closeOnFork) {
+            fileDescriptorsCloseOnFork.add(fileDescriptor);
+        } else {
+            fileDescriptorsCloseOnFork.remove(fileDescriptor);
+        }
+    }
+
     /// Copies the parent's descriptor table using Linux fork-style shared open file descriptions.
     protected void copyStandardFilesFrom(GuestSyscalls parent) {
         for (int index = 0; index < standardFiles.length; index++) {
+            if (!parent.standardFileOpen[index] || parent.fileDescriptorCloseOnFork(index)) {
+                standardFileOpen[index] = false;
+                standardFileCloseOnExec[index] = false;
+                continue;
+            }
             @Nullable OpenFile openFile = parent.standardFiles[index];
             if (openFile != null) {
                 openFile.retain();
             }
             standardFiles[index] = openFile;
+            standardFileOpen[index] = true;
             standardFileCloseOnExec[index] = parent.standardFileCloseOnExec[index];
         }
     }
@@ -10323,7 +11464,13 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
     /// Copies the parent's non-standard descriptor table using Linux fork-style shared open file descriptions.
     protected void copyOpenFilesFrom(GuestSyscalls parent) {
         for (int index = 0; index < parent.openFiles.size(); index++) {
+            int fileDescriptor = index + 3;
             @Nullable OpenFile openFile = parent.openFiles.get(index);
+            if (parent.fileDescriptorCloseOnFork(fileDescriptor)) {
+                openFiles.add(null);
+                openFileCloseOnExecFlags.add(false);
+                continue;
+            }
             if (openFile != null) {
                 openFile.retain();
             }
@@ -10334,6 +11481,9 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
 
     /// Returns a new descriptor entry that duplicates the supplied file descriptor.
     protected @Nullable OpenFile duplicateOpenFile(int fileDescriptor) {
+        if (!isOpenFileDescriptor(fileDescriptor)) {
+            return null;
+        }
         @Nullable OpenFile openFile = openFile(fileDescriptor);
         if (openFile != null) {
             openFile.retain();
@@ -10370,7 +11520,9 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
 
     /// Returns true when a file descriptor refers to a standard stream or open guest descriptor.
     protected boolean isOpenFileDescriptor(int fileDescriptor) {
-        return isStandardFileDescriptor(fileDescriptor) || openFile(fileDescriptor) != null;
+        return isStandardFileDescriptor(fileDescriptor)
+                ? standardFileOpen[fileDescriptor]
+                : openFile(fileDescriptor) != null;
     }
 
     /// Returns Linux status flags for a standard stream or open guest descriptor.
@@ -10963,6 +12115,9 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
     /// Returns the underlying standard descriptor number, or `-1` for non-standard descriptors.
     protected int standardFileDescriptorFor(int fileDescriptor) {
         if (isStandardFileDescriptor(fileDescriptor)) {
+            if (!standardFileOpen[fileDescriptor]) {
+                return -1;
+            }
             @Nullable OpenFile openFile = standardFiles[fileDescriptor];
             if (openFile != null) {
                 return openFile.isStandardFileDescriptor() ? openFile.standardFileDescriptor() : -1;
@@ -10982,13 +12137,19 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
         return fileDescriptor >= 0 && fileDescriptor <= 2;
     }
 
-    /// Stores one process-style `clone` child tracked by its parent process.
+    /// Stores one process-style child tracked by its parent process.
     protected static final class ChildProcess {
-        /// The Linux process id visible to the parent.
+        /// The guest process id visible to the parent.
         private final int processId;
 
-        /// The Linux process group id visible to wait selectors.
+        /// The guest process group id visible to wait selectors.
         private int processGroupId;
+
+        /// Whether the child uses clone-child rather than `SIGCHLD` wait selection.
+        private final boolean cloneChild;
+
+        /// The guest thread id that created the child process.
+        private final int parentThreadId;
 
         /// The syscall handler owned by the child process.
         private final GuestSyscalls syscalls;
@@ -10997,32 +12158,53 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
         private final Thread thread;
 
         /// Whether the child process has reported a final exit code.
-        private boolean exited;
+        private volatile boolean exited;
+
+        /// Whether a wait operation has consumed the child's final status.
+        private volatile boolean reaped;
 
         /// The low eight bits of the child process exit code.
         private int exitCode;
 
         /// Creates a tracked child process.
-        protected ChildProcess(int processId, int processGroupId, GuestSyscalls syscalls, Thread thread) {
+        protected ChildProcess(
+                int processId,
+                int processGroupId,
+                boolean cloneChild,
+                int parentThreadId,
+                GuestSyscalls syscalls,
+                Thread thread) {
             this.processId = processId;
             this.processGroupId = processGroupId;
+            this.cloneChild = cloneChild;
+            this.parentThreadId = parentThreadId;
             this.syscalls = syscalls;
             this.thread = thread;
         }
 
-        /// Returns the Linux process id visible to the parent.
-        private int processId() {
+        /// Returns the guest process id visible to the parent.
+        protected int processId() {
             return processId;
         }
 
         /// Returns the child process syscall handler.
-        private GuestSyscalls syscalls() {
+        protected GuestSyscalls syscalls() {
             return syscalls;
         }
 
-        /// Returns the Linux process group id visible to wait selectors.
+        /// Returns the guest process group id visible to wait selectors.
         protected int processGroupId() {
             return processGroupId;
+        }
+
+        /// Returns true when clone-specific wait options select this child.
+        protected boolean cloneChild() {
+            return cloneChild;
+        }
+
+        /// Returns the guest thread id that created this child process.
+        private int parentThreadId() {
+            return parentThreadId;
         }
 
         /// Updates the Linux process group id visible to wait selectors.
@@ -11035,13 +12217,13 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
             return thread;
         }
 
-        /// Returns true when this child matches a Linux `wait4` pid selector.
-        private boolean matches(long waitProcessId) {
+        /// Returns true when this child matches a `wait4`-style process selector.
+        private boolean matches(long waitProcessId, int currentProcessGroupId) {
             if (waitProcessId == -1) {
                 return true;
             }
             if (waitProcessId == 0) {
-                return true;
+                return processGroupId == currentProcessGroupId;
             }
             if (waitProcessId > 0) {
                 return waitProcessId == processId;
@@ -11058,13 +12240,72 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
         }
 
         /// Returns true after the child has exited.
-        private boolean exited() {
+        protected boolean exited() {
             return exited;
         }
 
-        /// Returns the Linux wait status for a normal process exit.
-        private int waitStatus() {
+        /// Records that a wait operation consumed the child's final status.
+        private void markReaped() {
+            reaped = true;
+        }
+
+        /// Returns true after a wait operation has consumed the child's final status.
+        private boolean reaped() {
+            return reaped;
+        }
+
+        /// Returns the low eight bits of the normal process exit code.
+        protected int exitCode() {
+            return exitCode;
+        }
+
+        /// Returns the real user id held by the child at observation time.
+        protected long userId() {
+            return syscalls.credentials.realUserId();
+        }
+
+        /// Returns the wait status for a normal process exit.
+        protected int waitStatus() {
             return exitCode << 8;
+        }
+    }
+
+    /// Describes one child-wait attempt.
+    ///
+    /// @param result the positive child process id, zero for a nonblocking miss, or a negative errno
+    /// @param child the observed child, or null when no child event was returned
+    @NotNullByDefault
+    protected record ChildWaitResult(long result, @Nullable ChildProcess child) {
+    }
+
+    /// Describes a `getpriority` lookup without conflating a negative nice value with an error.
+    ///
+    /// @param niceValue the lowest nice value among selected processes when `error` is zero
+    /// @param error zero on success, or a raw negative errno when no value is available
+    @NotNullByDefault
+    protected record PriorityResult(int niceValue, long error) {
+    }
+
+    /// Describes a Linux process file descriptor target.
+    ///
+    /// @param processId the stable guest process or thread id represented by the descriptor
+    /// @param syscalls the syscall handler owned by the target process
+    /// @param childProcess the caller's tracked child record, or null when the target is not its child
+    /// @param thread the specific target thread, or null when the descriptor refers to the whole process
+    @NotNullByDefault
+    protected record ProcessFile(
+            int processId,
+            GuestSyscalls syscalls,
+            @Nullable ChildProcess childProcess,
+            @Nullable GuestThread thread) {
+        /// Returns true after the target process has exited.
+        protected boolean exited() {
+            return syscalls.processExitRequested || thread != null && thread.exited();
+        }
+
+        /// Returns true after the caller has consumed the target child's wait status.
+        protected boolean reaped() {
+            return childProcess != null && childProcess.reaped();
         }
     }
 
@@ -11834,6 +13075,9 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
         /// The pseudoterminal endpoint backing this descriptor, or null for non-PTY entries.
         private final @Nullable PtyEndpoint ptyEndpoint;
 
+        /// The process target backing this descriptor, or null for non-pidfd entries.
+        private final @Nullable ProcessFile processFile;
+
         /// Whether this descriptor is backed by `/dev/null`.
         private final boolean nullDevice;
 
@@ -11954,6 +13198,7 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
             this.socket = socket;
             this.terminalDevice = terminalDevice;
             this.ptyEndpoint = ptyEndpoint;
+            this.processFile = null;
             this.nullDevice = nullDevice;
             this.directory = directory;
             this.pipeReader = pipeReader;
@@ -11961,6 +13206,33 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
             this.readable = readable;
             this.writable = writable;
             this.append = append;
+            this.nonblocking = nonblocking;
+        }
+
+        /// Creates a Linux process file descriptor entry.
+        private OpenFile(ProcessFile processFile, boolean nonblocking) {
+            this.standardFileDescriptor = -1;
+            this.path = null;
+            this.guestPath = null;
+            this.tarNode = null;
+            this.virtualNode = null;
+            this.virtualMount = null;
+            this.channel = null;
+            this.pipe = null;
+            this.eventCounter = null;
+            this.timerFile = null;
+            this.epollSet = null;
+            this.socket = null;
+            this.terminalDevice = null;
+            this.ptyEndpoint = null;
+            this.processFile = processFile;
+            this.nullDevice = false;
+            this.directory = false;
+            this.pipeReader = false;
+            this.pipeWriter = false;
+            this.readable = true;
+            this.writable = true;
+            this.append = false;
             this.nonblocking = nonblocking;
         }
 
@@ -12426,6 +13698,11 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
                     nonblocking);
         }
 
+        /// Creates an entry backed by a Linux process file descriptor target.
+        static OpenFile processFile(ProcessFile processFile, boolean nonblocking) {
+            return new OpenFile(processFile, nonblocking);
+        }
+
         /// Returns true when this entry duplicates one of the original standard streams.
         boolean isStandardFileDescriptor() {
             return standardFileDescriptor >= 0;
@@ -12464,6 +13741,11 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
         /// Returns true when this entry is backed by a guest socket.
         boolean isSocket() {
             return socket != null;
+        }
+
+        /// Returns true when this entry is backed by a Linux process file descriptor target.
+        boolean isProcessFile() {
+            return processFile != null;
         }
 
         /// Returns true when this entry is backed by a virtual terminal device.
@@ -12530,6 +13812,12 @@ public sealed abstract class GuestSyscalls implements AutoCloseable
         GuestSocket socket() {
             assert socket != null;
             return socket;
+        }
+
+        /// Returns the Linux process file descriptor target backing this descriptor.
+        ProcessFile processFile() {
+            assert processFile != null;
+            return processFile;
         }
 
         /// Returns the terminal device backing this descriptor.

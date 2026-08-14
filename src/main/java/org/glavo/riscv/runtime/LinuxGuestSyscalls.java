@@ -61,9 +61,9 @@ import java.util.ArrayList;
 
 /// Handles the Linux-compatible syscall subset exposed by the simulator.
 @NotNullByDefault
-public final class LinuxGuestSyscalls extends GuestSyscalls {
+public non-sealed class LinuxGuestSyscalls extends GuestSyscalls {
     /// The backend used for guest Internet sockets.
-    private GuestNetworkBackend networkBackend = GuestNetworkMode.NONE.backend();
+    protected GuestNetworkBackend networkBackend = GuestNetworkMode.NONE.backend();
 
     /// Creates a Linux syscall handler backed by the supplied host streams and heap boundary.
     public LinuxGuestSyscalls(
@@ -317,6 +317,79 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
     /// Linux `SIGCHLD`.
     private static final long SIGNAL_CHILD = 17L;
 
+    /// Linux `P_ALL` wait selector.
+    private static final int WAIT_ID_ALL = 0;
+
+    /// Linux `P_PID` wait selector.
+    private static final int WAIT_ID_PROCESS = 1;
+
+    /// Linux `P_PGID` wait selector.
+    private static final int WAIT_ID_PROCESS_GROUP = 2;
+
+    /// Linux `P_PIDFD` wait selector.
+    private static final int WAIT_ID_PROCESS_FILE_DESCRIPTOR = 3;
+
+    /// Linux `PIDFD_NONBLOCK`.
+    private static final long PIDFD_NONBLOCK = O_NONBLOCK;
+
+    /// Linux `PIDFD_THREAD`.
+    private static final long PIDFD_THREAD = O_EXCL;
+
+    /// Linux flags accepted by `pidfd_open`.
+    private static final long SUPPORTED_PIDFD_OPEN_FLAGS = PIDFD_NONBLOCK | PIDFD_THREAD;
+
+    /// Linux `WEXITED`.
+    private static final long WAIT_ID_EXITED = 0x0000_0004L;
+
+    /// Linux `WNOWAIT`.
+    private static final long WAIT_ID_NO_WAIT = 0x0100_0000L;
+
+    /// Linux internal `__WNOTHREAD`.
+    private static final long WAIT_ID_NOT_THREAD = 0x2000_0000L;
+
+    /// Linux internal `__WALL`.
+    private static final long WAIT_ID_ALL_CHILDREN = 0x4000_0000L;
+
+    /// Linux internal `__WCLONE`.
+    private static final long WAIT_ID_CLONE_CHILDREN = 0x8000_0000L;
+
+    /// Linux `waitid` option bits accepted by the simulator.
+    private static final long SUPPORTED_WAIT_ID_OPTIONS = WAIT_NO_HANG
+            | WAIT_UNTRACED
+            | WAIT_ID_EXITED
+            | WAIT_CONTINUED
+            | WAIT_ID_NO_WAIT
+            | WAIT_ID_NOT_THREAD
+            | WAIT_ID_ALL_CHILDREN
+            | WAIT_ID_CLONE_CHILDREN;
+
+    /// Linux `waitid` option bits that select reportable child events.
+    private static final long WAIT_ID_EVENT_OPTIONS = WAIT_UNTRACED | WAIT_ID_EXITED | WAIT_CONTINUED;
+
+    /// The byte size of Linux RISC-V `siginfo_t`.
+    private static final long WAIT_ID_SIGNAL_INFO_SIZE = 128;
+
+    /// The byte offset of `si_signo` inside Linux RISC-V `siginfo_t`.
+    private static final long WAIT_ID_SIGNAL_NUMBER_OFFSET = 0;
+
+    /// The byte offset of `si_errno` inside Linux RISC-V `siginfo_t`.
+    private static final long WAIT_ID_ERRNO_OFFSET = Integer.BYTES;
+
+    /// The byte offset of `si_code` inside Linux RISC-V `siginfo_t`.
+    private static final long WAIT_ID_CODE_OFFSET = 2L * Integer.BYTES;
+
+    /// The byte offset of `si_pid` inside Linux RISC-V `siginfo_t`.
+    private static final long WAIT_ID_PROCESS_ID_OFFSET = 4L * Integer.BYTES;
+
+    /// The byte offset of `si_uid` inside Linux RISC-V `siginfo_t`.
+    private static final long WAIT_ID_USER_ID_OFFSET = 5L * Integer.BYTES;
+
+    /// The byte offset of `si_status` inside Linux RISC-V `siginfo_t`.
+    private static final long WAIT_ID_STATUS_OFFSET = 6L * Integer.BYTES;
+
+    /// Linux `CLD_EXITED`.
+    private static final int WAIT_ID_CHILD_EXITED = 1;
+
     /// Linux `SIGILL`.
     private static final long SIGNAL_ILLEGAL_INSTRUCTION = 4L;
 
@@ -337,18 +410,6 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
 
     /// Linux capability ABI version 3.
     private static final int LINUX_CAPABILITY_VERSION_3 = 0x2008_0522;
-
-    /// Linux `PRIO_PROCESS`.
-    private static final long PRIO_PROCESS = 0;
-
-    /// Linux `PRIO_PGRP`.
-    private static final long PRIO_PROCESS_GROUP = 1;
-
-    /// Linux `PRIO_USER`.
-    private static final long PRIO_USER = 2;
-
-    /// The raw Linux syscall value for nice level zero.
-    private static final long DEFAULT_RAW_PRIORITY = 20;
 
     /// The byte offset of `version` inside `struct __user_cap_header_struct`.
     private static final long CAPABILITY_HEADER_VERSION_OFFSET = 0;
@@ -514,6 +575,7 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
                     | CLONE_VM
                     | CLONE_FS
                     | CLONE_FILES
+                    | CLONE_PIDFD
                     | CLONE_VFORK
                     | CLONE_SYSVSEM
                     | CLONE_SETTLS
@@ -529,6 +591,9 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
 
     /// The byte offset of `flags` inside `struct clone_args`.
     private static final long CLONE_ARGS_FLAGS_OFFSET = 0;
+
+    /// The byte offset of `pidfd` inside `struct clone_args`.
+    private static final long CLONE_ARGS_PIDFD_OFFSET = Long.BYTES;
 
     /// The byte offset of `child_tid` inside `struct clone_args`.
     private static final long CLONE_ARGS_CHILD_TID_OFFSET = 16;
@@ -758,6 +823,30 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
             long parentTidAddress,
             long tlsAddress,
             long childTidAddress) {
+        if ((flags & CLONE_PIDFD) != 0 && (flags & CLONE_PARENT_SETTID) != 0) {
+            return EINVAL;
+        }
+        return cloneWithPidfdAddress(
+                state,
+                pc,
+                flags,
+                stackAddress,
+                parentTidAddress,
+                tlsAddress,
+                childTidAddress,
+                (flags & CLONE_PIDFD) != 0 ? parentTidAddress : 0);
+    }
+
+    /// Routes a Linux clone request while preserving the distinct `clone3` pidfd output pointer.
+    protected long cloneWithPidfdAddress(
+            RiscVThreadState state,
+            long pc,
+            long flags,
+            long stackAddress,
+            long parentTidAddress,
+            long tlsAddress,
+            long childTidAddress,
+            long pidfdAddress) {
         long exitSignal = flags & CLONE_EXIT_SIGNAL_MASK;
         long controlFlags = flags & ~CLONE_EXIT_SIGNAL_MASK;
         if ((controlFlags & CLONE_THREAD) != 0) {
@@ -766,7 +855,15 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
             }
             return cloneThread(state, pc, controlFlags, stackAddress, parentTidAddress, tlsAddress, childTidAddress);
         }
-        return cloneProcess(state, pc, flags, stackAddress, parentTidAddress, tlsAddress, childTidAddress);
+        return cloneProcess(
+                state,
+                pc,
+                flags,
+                stackAddress,
+                parentTidAddress,
+                tlsAddress,
+                childTidAddress,
+                pidfdAddress);
     }
 
     /// Handles Linux `clone3` by translating `struct clone_args` to the existing clone implementation.
@@ -799,6 +896,7 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
             return EINVAL;
         }
 
+        long pidfdAddress = memory.readLong(argumentsAddress + CLONE_ARGS_PIDFD_OFFSET);
         long childTidAddress = memory.readLong(argumentsAddress + CLONE_ARGS_CHILD_TID_OFFSET);
         long parentTidAddress = memory.readLong(argumentsAddress + CLONE_ARGS_PARENT_TID_OFFSET);
         long stackAddress = memory.readLong(argumentsAddress + CLONE_ARGS_STACK_OFFSET);
@@ -807,7 +905,7 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
         long setTidAddress = cloneArgumentLong(argumentsAddress, size, CLONE_ARGS_SET_TID_OFFSET);
         long setTidSize = cloneArgumentLong(argumentsAddress, size, CLONE_ARGS_SET_TID_SIZE_OFFSET);
         long cgroup = cloneArgumentLong(argumentsAddress, size, CLONE_ARGS_CGROUP_OFFSET);
-        if ((flags & CLONE_PIDFD) != 0 || setTidAddress != 0 || setTidSize != 0 || cgroup != 0) {
+        if (setTidAddress != 0 || setTidSize != 0 || cgroup != 0) {
             return EINVAL;
         }
 
@@ -815,14 +913,15 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
         if (childStackAddress < 0) {
             return EINVAL;
         }
-        return clone(
+        return cloneWithPidfdAddress(
                 state,
                 pc,
                 flags | exitSignal,
                 childStackAddress,
                 parentTidAddress,
                 tlsAddress,
-                childTidAddress);
+                childTidAddress,
+                pidfdAddress);
     }
 
     /// Reads an optional 64-bit `struct clone_args` field when it is present in the supplied size.
@@ -931,12 +1030,16 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
             long stackAddress,
             long parentTidAddress,
             long tlsAddress,
-            long childTidAddress) {
+            long childTidAddress,
+            long pidfdAddress) {
         long exitSignal = flags & CLONE_EXIT_SIGNAL_MASK;
         if ((flags & ~SUPPORTED_PROCESS_CLONE_FLAGS) != 0
                 || ((flags & CLONE_VM) != 0 && (flags & CLONE_VFORK) == 0)
                 || exitSignal != SIGNAL_CHILD && exitSignal != 0) {
             return EINVAL;
+        }
+        if ((flags & CLONE_PIDFD) != 0 && !memory.isBacked(pidfdAddress, Integer.BYTES)) {
+            return EFAULT;
         }
         if (!guestThreadingEnabled()) {
             return EAGAIN;
@@ -976,6 +1079,7 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
                 childStackAddress,
                 tlsAddress,
                 (flags & CLONE_SETTLS) != 0);
+        initializeProcessChildSyscallResult(child);
 
         if ((flags & CLONE_PARENT_SETTID) != 0) {
             memory.writeInt(parentTidAddress, childProcess.id());
@@ -1008,7 +1112,13 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
         }
         thread.setUncaughtExceptionHandler((failedThread, throwable) -> childSyscalls.recordThreadFailure(throwable));
 
-        ChildProcess childRecord = new ChildProcess(childProcess.id(), childProcess.processGroupId(), childSyscalls, thread);
+        ChildProcess childRecord = new ChildProcess(
+                childProcess.id(),
+                childProcess.processGroupId(),
+                exitSignal != SIGNAL_CHILD,
+                state.guestThread().id(),
+                childSyscalls,
+                thread);
         synchronized (childProcessLock) {
             childProcesses.add(childRecord);
         }
@@ -1021,7 +1131,194 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
             childMemory.close();
             return EAGAIN;
         }
+        if ((flags & CLONE_PIDFD) != 0) {
+            long processFileDescriptor = addOpenFile(
+                    OpenFile.processFile(
+                            new ProcessFile(childProcess.id(), childSyscalls, childRecord, null),
+                            false),
+                    true);
+            memory.writeInt(pidfdAddress, (int) processFileDescriptor);
+        }
         return childProcess.id();
+    }
+
+    /// Creates a process with traditional `fork` register and signal semantics.
+    protected long forkProcess(RiscVThreadState state, long pc) {
+        return cloneProcess(state, pc, SIGNAL_CHILD, 0, 0, 0, 0, 0);
+    }
+
+    /// Applies ABI-specific successful-syscall registers to a newly forked child process.
+    protected void initializeProcessChildSyscallResult(RiscVThreadState child) {
+    }
+
+    /// Opens a Linux process file descriptor for the current process, one of its threads, or a direct child.
+    protected long pidfdOpen(long processId, long flags) {
+        long normalizedFlags = Integer.toUnsignedLong((int) flags);
+        if (processId <= 0
+                || processId != (int) processId
+                || (normalizedFlags & ~SUPPORTED_PIDFD_OPEN_FLAGS) != 0) {
+            return EINVAL;
+        }
+
+        int targetId = (int) processId;
+        @Nullable ChildProcess child = null;
+        GuestSyscalls targetSyscalls;
+        if (targetId == process.id()
+                || (normalizedFlags & PIDFD_THREAD) != 0 && isKnownGuestThreadId(targetId)) {
+            targetSyscalls = this;
+        } else {
+            synchronized (childProcessLock) {
+                child = childProcess(targetId);
+                if (child == null) {
+                    return ESRCH;
+                }
+                targetSyscalls = child.syscalls();
+            }
+        }
+
+        @Nullable GuestThread targetThread = null;
+        if ((normalizedFlags & PIDFD_THREAD) != 0) {
+            targetThread = targetSyscalls.guestThread(targetId);
+            if (targetThread == null) {
+                return ESRCH;
+            }
+        }
+
+        return addOpenFile(
+                OpenFile.processFile(
+                        new ProcessFile(
+                                targetId,
+                                targetSyscalls,
+                                child,
+                                targetThread),
+                        (normalizedFlags & PIDFD_NONBLOCK) != 0),
+                true);
+    }
+
+    /// Sends or probes a signal through a Linux process file descriptor.
+    protected long pidfdSendSignal(
+            int processFileDescriptor,
+            long signalNumber,
+            long signalInfoAddress,
+            long flags) {
+        if (flags != 0 || !isValidSignalNumber(signalNumber)) {
+            return EINVAL;
+        }
+        if (signalInfoAddress != 0) {
+            return EINVAL;
+        }
+
+        @Nullable OpenFile openFile = openFile(processFileDescriptor);
+        if (openFile == null || !openFile.isProcessFile()) {
+            return EBADF;
+        }
+        ProcessFile processFile = openFile.processFile();
+        if (processFile.exited()) {
+            return ESRCH;
+        }
+        return 0;
+    }
+
+    /// Waits for a child event using Linux `waitid` selectors and output layouts.
+    private long waitid(
+            RiscVThreadState state,
+            long idType,
+            long id,
+            long signalInfoAddress,
+            long options,
+            long rusageAddress) {
+        long normalizedOptions = Integer.toUnsignedLong((int) options);
+        if ((normalizedOptions & ~SUPPORTED_WAIT_ID_OPTIONS) != 0
+                || (normalizedOptions & WAIT_ID_EVENT_OPTIONS) == 0) {
+            return EINVAL;
+        }
+        if (signalInfoAddress != 0 && !memory.isBacked(signalInfoAddress, WAIT_ID_SIGNAL_INFO_SIZE)) {
+            return EFAULT;
+        }
+        if (rusageAddress != 0 && !memory.isBacked(rusageAddress, RUSAGE_SIZE)) {
+            return EFAULT;
+        }
+
+        int selectorType = (int) idType;
+        int identifier = (int) id;
+        long processSelector;
+        boolean nonblockingProcessFile = false;
+        switch (selectorType) {
+            case WAIT_ID_ALL -> processSelector = -1;
+            case WAIT_ID_PROCESS -> {
+                if (identifier <= 0) {
+                    return EINVAL;
+                }
+                processSelector = identifier;
+            }
+            case WAIT_ID_PROCESS_GROUP -> {
+                if (identifier < 0) {
+                    return EINVAL;
+                }
+                processSelector = identifier == 0 ? 0 : -(long) identifier;
+            }
+            case WAIT_ID_PROCESS_FILE_DESCRIPTOR -> {
+                if (identifier < 0) {
+                    return EINVAL;
+                }
+                @Nullable OpenFile openFile = openFile(identifier);
+                if (openFile == null) {
+                    return isOpenFileDescriptor(identifier) ? EINVAL : EBADF;
+                }
+                if (!openFile.isProcessFile()) {
+                    return EINVAL;
+                }
+                processSelector = openFile.processFile().processId();
+                nonblockingProcessFile = openFile.nonblocking();
+            }
+            default -> {
+                return EINVAL;
+            }
+        }
+
+        boolean noHang = (normalizedOptions & WAIT_NO_HANG) != 0;
+        ChildWaitResult waitResult = waitForExitedChild(
+                processSelector,
+                (normalizedOptions & WAIT_ID_EXITED) != 0,
+                noHang || nonblockingProcessFile,
+                (normalizedOptions & WAIT_ID_NO_WAIT) != 0,
+                (normalizedOptions & WAIT_ID_CLONE_CHILDREN) == 0
+                        || (normalizedOptions & WAIT_ID_ALL_CHILDREN) != 0,
+                (normalizedOptions & (WAIT_ID_CLONE_CHILDREN | WAIT_ID_ALL_CHILDREN)) != 0,
+                (normalizedOptions & WAIT_ID_NOT_THREAD) != 0 ? state.guestThread().id() : 0);
+        if (waitResult.result() < 0) {
+            return waitResult.result();
+        }
+        if (waitResult.result() == 0) {
+            if (nonblockingProcessFile && !noHang) {
+                return EAGAIN;
+            }
+            writeWaitIdSignalInfo(signalInfoAddress, null);
+            return 0;
+        }
+
+        @Nullable ChildProcess child = waitResult.child();
+        if (child == null) {
+            throw new AssertionError("Successful waitid did not return a child process");
+        }
+        writeWaitIdSignalInfo(signalInfoAddress, child);
+        if (rusageAddress != 0) {
+            memory.clear(rusageAddress, RUSAGE_SIZE);
+        }
+        return 0;
+    }
+
+    /// Writes the fields populated by Linux `waitid`, or a zeroed no-event result.
+    private void writeWaitIdSignalInfo(long address, @Nullable ChildProcess child) {
+        if (address == 0) {
+            return;
+        }
+        memory.writeInt(address + WAIT_ID_SIGNAL_NUMBER_OFFSET, child == null ? 0 : (int) SIGNAL_CHILD);
+        memory.writeInt(address + WAIT_ID_ERRNO_OFFSET, 0);
+        memory.writeInt(address + WAIT_ID_CODE_OFFSET, child == null ? 0 : WAIT_ID_CHILD_EXITED);
+        memory.writeInt(address + WAIT_ID_PROCESS_ID_OFFSET, child == null ? 0 : child.processId());
+        memory.writeInt(address + WAIT_ID_USER_ID_OFFSET, child == null ? 0 : GuestCredentials.idToInt(child.userId()));
+        memory.writeInt(address + WAIT_ID_STATUS_OFFSET, child == null ? 0 : child.exitCode());
     }
 
 
@@ -1372,40 +1669,17 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
         return (1L << (CAPABILITY_LAST_CAP + 1)) - 1L;
     }
 
-    /// Updates deterministic process priority when the target exists.
+    /// Updates persistent Linux process priority for selected known processes.
     protected long setpriority(long which, long who, long priority) {
-        if (priority < -20 || priority > 19) {
-            return EINVAL;
-        }
-        return priorityTargetExists(which, who) ? 0 : priorityTargetError(which);
+        return setLinuxProcessPriority(which, who, priority);
     }
 
-    /// Returns the deterministic raw Linux priority for an existing target.
+    /// Returns the raw Linux priority encoding for the highest-priority selected process.
     protected long getpriority(long which, long who) {
-        return priorityTargetExists(which, who) ? DEFAULT_RAW_PRIORITY : priorityTargetError(which);
-    }
-
-    /// Returns true when a priority syscall target exists in this runtime.
-    protected boolean priorityTargetExists(long which, long who) {
-        if (which == PRIO_PROCESS) {
-            if (who == 0 || who == process.id()) {
-                return true;
-            }
-            return who == (int) who && isKnownChildProcessId(who);
-        }
-        if (which == PRIO_PROCESS_GROUP) {
-            long processGroupId = who == 0 ? process.processGroupId() : who;
-            return processGroupId == (int) processGroupId && isKnownOrSelfProcessGroupId((int) processGroupId);
-        }
-        if (which == PRIO_USER) {
-            return who == 0 || who == credentials.realUserId() || who == credentials.effectiveUserId();
-        }
-        return false;
-    }
-
-    /// Returns the raw Linux error for a priority syscall target lookup.
-    protected static long priorityTargetError(long which) {
-        return which == PRIO_PROCESS || which == PRIO_PROCESS_GROUP || which == PRIO_USER ? ESRCH : EINVAL;
+        PriorityResult result = linuxProcessPriority(which, who);
+        return result.error() != 0
+                ? result.error()
+                : LINUX_DEFAULT_RAW_PRIORITY - result.niceValue();
     }
 
 
@@ -1426,9 +1700,21 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
         return ESRCH;
     }
 
-    /// Returns the deterministic session id for the current process or a tracked child process.
+    /// Returns the session id for the current process or a tracked child process.
     protected long getsid(long processId) {
-        return getpgid(processId);
+        if (processId == 0 || processId == process.id()) {
+            return process.sessionId();
+        }
+        if (processId != (int) processId) {
+            return ESRCH;
+        }
+        synchronized (childProcessLock) {
+            @Nullable ChildProcess child = childProcess((int) processId);
+            if (child != null) {
+                return child.syscalls().process.sessionId();
+            }
+        }
+        return ESRCH;
     }
 
 
@@ -1608,7 +1894,15 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
     /// Records an exited child and queues the process-level `SIGCHLD` notification.
     @Override
     protected void recordChildProcessExit(int processId, long exitCode) {
+        boolean queueChildSignal;
+        synchronized (childProcessLock) {
+            @Nullable ChildProcess child = childProcess(processId);
+            queueChildSignal = child != null && !child.cloneChild();
+        }
         super.recordChildProcessExit(processId, exitCode);
+        if (!queueChildSignal) {
+            return;
+        }
         synchronized (childProcessLock) {
             childSignalPending = true;
             childProcessLock.notifyAll();
@@ -2202,22 +2496,22 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
     private static final long AF_NETLINK = 16;
 
     /// Linux address family number for Unix domain sockets.
-    private static final long AF_UNIX = 1;
+    protected static final long AF_UNIX = 1;
 
     /// Linux address family number for IPv4 sockets.
-    private static final int AF_INET = 2;
+    protected static final int AF_INET = 2;
 
     /// Linux address family number for IPv6 sockets.
-    private static final int AF_INET6 = 10;
+    protected static final int AF_INET6 = 10;
 
     /// Linux socket type mask excluding socket creation flags.
-    private static final long SOCK_TYPE_MASK = 0xf;
+    protected static final long SOCK_TYPE_MASK = 0xf;
 
     /// Linux stream socket type.
-    private static final long SOCK_STREAM = 1;
+    protected static final long SOCK_STREAM = 1;
 
     /// Linux datagram socket type.
-    private static final long SOCK_DGRAM = 2;
+    protected static final long SOCK_DGRAM = 2;
 
     /// Linux raw socket type.
     private static final long SOCK_RAW = 3;
@@ -2226,61 +2520,64 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
     private static final long NETLINK_ROUTE = 0;
 
     /// Linux IPv4 protocol level.
-    private static final long IPPROTO_IP = 0;
+    protected static final long IPPROTO_IP = 0;
 
     /// Linux TCP protocol number.
-    private static final long IPPROTO_TCP = 6;
+    protected static final long IPPROTO_TCP = 6;
 
     /// Linux UDP protocol number.
-    private static final long IPPROTO_UDP = 17;
+    protected static final long IPPROTO_UDP = 17;
 
     /// Linux IPv6 protocol level.
-    private static final long IPPROTO_IPV6 = 41;
+    protected static final long IPPROTO_IPV6 = 41;
 
     /// Linux `IP_RECVERR`.
-    private static final long IP_RECVERR = 11;
+    protected static final long IP_RECVERR = 11;
 
     /// Linux `IPV6_RECVERR`.
-    private static final long IPV6_RECVERR = 25;
+    protected static final long IPV6_RECVERR = 25;
 
     /// Linux socket option level for generic socket options.
-    private static final long SOL_SOCKET = 1;
+    protected static final long SOL_SOCKET = 1;
 
     /// Linux `SO_REUSEADDR`.
-    private static final long SO_REUSEADDR = 2;
+    protected static final long SO_REUSEADDR = 2;
 
     /// Linux `SO_ERROR`.
-    private static final long SO_ERROR = 4;
+    protected static final long SO_ERROR = 4;
+
+    /// Linux `SO_BROADCAST`.
+    protected static final long SO_BROADCAST = 6;
 
     /// Linux `SO_SNDBUF`.
-    private static final long SO_SNDBUF = 7;
+    protected static final long SO_SNDBUF = 7;
 
     /// Linux `SO_RCVBUF`.
-    private static final long SO_RCVBUF = 8;
+    protected static final long SO_RCVBUF = 8;
 
     /// Linux `SO_KEEPALIVE`.
-    private static final long SO_KEEPALIVE = 9;
+    protected static final long SO_KEEPALIVE = 9;
 
     /// Linux `SO_REUSEPORT`.
-    private static final long SO_REUSEPORT = 15;
+    protected static final long SO_REUSEPORT = 15;
 
     /// Linux `TCP_NODELAY`.
-    private static final long TCP_NODELAY = 1;
+    protected static final long TCP_NODELAY = 1;
 
     /// Linux `IPV6_V6ONLY`.
-    private static final long IPV6_V6ONLY = 26;
+    protected static final long IPV6_V6ONLY = 26;
 
     /// Linux `MSG_DONTWAIT`.
-    private static final long MSG_DONTWAIT = 0x40L;
+    protected static final long MSG_DONTWAIT = 0x40L;
 
     /// Linux `MSG_NOSIGNAL`.
-    private static final long MSG_NOSIGNAL = 0x4000L;
+    protected static final long MSG_NOSIGNAL = 0x4000L;
 
     /// Linux `MSG_WAITFORONE`.
     private static final long MSG_WAITFORONE = 0x10000L;
 
     /// Linux message flags accepted by the host socket backend.
-    private static final long SUPPORTED_SOCKET_MESSAGE_FLAGS = MSG_DONTWAIT | MSG_NOSIGNAL;
+    protected static final long SUPPORTED_SOCKET_MESSAGE_FLAGS = MSG_DONTWAIT | MSG_NOSIGNAL;
 
     /// Linux `SHUT_RD`.
     private static final long SHUT_RD = 0;
@@ -2990,6 +3287,16 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
         return count;
     }
 
+    /// Returns the byte offset of `msg_flags` in the active guest ABI's socket message header.
+    protected long socketMessageFlagsOffset() {
+        return MSGHDR_FLAGS_OFFSET;
+    }
+
+    /// Reads `msg_iovlen` from the active guest ABI's socket message header.
+    protected long socketMessageIovecCount(long messageAddress) {
+        return memory.readLong(messageAddress + MSGHDR_IOV_LENGTH_OFFSET);
+    }
+
     /// Sends one minimal netlink route request described by a guest `struct msghdr`.
     protected long sendmsg(int fileDescriptor, long messageAddress, long flags) {
         @Nullable InternetSocket internetSocket = internetSocket(fileDescriptor);
@@ -2997,7 +3304,7 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
             if ((flags & ~SUPPORTED_SOCKET_MESSAGE_FLAGS) != 0) {
                 return EINVAL;
             }
-            if (!memory.isBacked(messageAddress, MSGHDR_FLAGS_OFFSET + Integer.BYTES)) {
+            if (!memory.isBacked(messageAddress, socketMessageFlagsOffset() + Integer.BYTES)) {
                 return EFAULT;
             }
 
@@ -3013,7 +3320,7 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
             }
 
             long iovecAddress = memory.readLong(messageAddress + MSGHDR_IOV_OFFSET);
-            long iovecCount = memory.readLong(messageAddress + MSGHDR_IOV_LENGTH_OFFSET);
+            long iovecCount = socketMessageIovecCount(messageAddress);
             if (iovecCount < 0 || iovecCount > IOV_MAX) {
                 return EINVAL;
             }
@@ -3039,7 +3346,7 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
             if ((flags & ~SUPPORTED_SOCKET_MESSAGE_FLAGS) != 0) {
                 return EINVAL;
             }
-            if (!memory.isBacked(messageAddress, MSGHDR_FLAGS_OFFSET + Integer.BYTES)) {
+            if (!memory.isBacked(messageAddress, socketMessageFlagsOffset() + Integer.BYTES)) {
                 return EFAULT;
             }
 
@@ -3054,7 +3361,7 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
             }
 
             long iovecAddress = memory.readLong(messageAddress + MSGHDR_IOV_OFFSET);
-            long iovecCount = memory.readLong(messageAddress + MSGHDR_IOV_LENGTH_OFFSET);
+            long iovecCount = socketMessageIovecCount(messageAddress);
             if (iovecCount < 0 || iovecCount > IOV_MAX) {
                 return EINVAL;
             }
@@ -3078,12 +3385,12 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
         if (socket == null) {
             return ENOTSOCK;
         }
-        if (!memory.isBacked(messageAddress, MSGHDR_FLAGS_OFFSET + Integer.BYTES)) {
+        if (!memory.isBacked(messageAddress, socketMessageFlagsOffset() + Integer.BYTES)) {
             return EFAULT;
         }
 
         long iovecAddress = memory.readLong(messageAddress + MSGHDR_IOV_OFFSET);
-        long iovecCount = memory.readLong(messageAddress + MSGHDR_IOV_LENGTH_OFFSET);
+        long iovecCount = socketMessageIovecCount(messageAddress);
         if (iovecCount < 0 || iovecCount > IOV_MAX) {
             return EINVAL;
         }
@@ -3107,12 +3414,12 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
             if ((flags & ~SUPPORTED_SOCKET_MESSAGE_FLAGS) != 0) {
                 return EINVAL;
             }
-            if (!memory.isBacked(messageAddress, MSGHDR_FLAGS_OFFSET + Integer.BYTES)) {
+            if (!memory.isBacked(messageAddress, socketMessageFlagsOffset() + Integer.BYTES)) {
                 return EFAULT;
             }
 
             long iovecAddress = memory.readLong(messageAddress + MSGHDR_IOV_OFFSET);
-            long iovecCount = memory.readLong(messageAddress + MSGHDR_IOV_LENGTH_OFFSET);
+            long iovecCount = socketMessageIovecCount(messageAddress);
             if (iovecCount < 0 || iovecCount > IOV_MAX) {
                 return EINVAL;
             }
@@ -3131,7 +3438,7 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
             if (result.error() != 0) {
                 return result.error();
             }
-            memory.writeInt(messageAddress + MSGHDR_FLAGS_OFFSET, 0);
+            memory.writeInt(messageAddress + socketMessageFlagsOffset(), 0);
             long nameAddress = memory.readLong(messageAddress + MSGHDR_NAME_OFFSET);
             long nameLength = Integer.toUnsignedLong(memory.readInt(messageAddress + MSGHDR_NAME_LENGTH_OFFSET));
             @Nullable InetSocketAddress source = result.address();
@@ -3152,12 +3459,12 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
             if ((flags & ~SUPPORTED_SOCKET_MESSAGE_FLAGS) != 0) {
                 return EINVAL;
             }
-            if (!memory.isBacked(messageAddress, MSGHDR_FLAGS_OFFSET + Integer.BYTES)) {
+            if (!memory.isBacked(messageAddress, socketMessageFlagsOffset() + Integer.BYTES)) {
                 return EFAULT;
             }
 
             long iovecAddress = memory.readLong(messageAddress + MSGHDR_IOV_OFFSET);
-            long iovecCount = memory.readLong(messageAddress + MSGHDR_IOV_LENGTH_OFFSET);
+            long iovecCount = socketMessageIovecCount(messageAddress);
             if (iovecCount < 0 || iovecCount > IOV_MAX) {
                 return EINVAL;
             }
@@ -3176,7 +3483,7 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
             if (result.error() != 0) {
                 return result.error();
             }
-            memory.writeInt(messageAddress + MSGHDR_FLAGS_OFFSET, 0);
+            memory.writeInt(messageAddress + socketMessageFlagsOffset(), 0);
             long nameAddress = memory.readLong(messageAddress + MSGHDR_NAME_OFFSET);
             long nameLength = Integer.toUnsignedLong(memory.readInt(messageAddress + MSGHDR_NAME_LENGTH_OFFSET));
             @Nullable String source = result.address();
@@ -3196,7 +3503,7 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
         if (socket == null) {
             return ENOTSOCK;
         }
-        if (!memory.isBacked(messageAddress, MSGHDR_FLAGS_OFFSET + Integer.BYTES)) {
+        if (!memory.isBacked(messageAddress, socketMessageFlagsOffset() + Integer.BYTES)) {
             return EFAULT;
         }
 
@@ -3211,10 +3518,10 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
             writeSockaddrNl(nameAddress, 0, 0);
             memory.writeInt(messageAddress + MSGHDR_NAME_LENGTH_OFFSET, (int) SOCKADDR_NL_SIZE);
         }
-        memory.writeInt(messageAddress + MSGHDR_FLAGS_OFFSET, 0);
+        memory.writeInt(messageAddress + socketMessageFlagsOffset(), 0);
 
         long iovecAddress = memory.readLong(messageAddress + MSGHDR_IOV_OFFSET);
-        long iovecCount = memory.readLong(messageAddress + MSGHDR_IOV_LENGTH_OFFSET);
+        long iovecCount = socketMessageIovecCount(messageAddress);
         if (iovecCount < 0 || iovecCount > IOV_MAX) {
             return EINVAL;
         }
@@ -3428,7 +3735,7 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
     }
 
     /// Reads one guest IPv4 or IPv6 socket address.
-    private AddressResult readInetSocketAddress(long address, long length) {
+    protected AddressResult readInetSocketAddress(long address, long length) {
         if (address == 0 || length < Short.BYTES || !memory.isBacked(address, Short.BYTES)) {
             return AddressResult.error(EFAULT);
         }
@@ -3461,7 +3768,7 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
     }
 
     /// Reads one guest Unix-domain socket address and maps it through the host filesystem namespace.
-    private UnixAddressResult readUnixSocketAddress(long address, long length) {
+    protected UnixAddressResult readUnixSocketAddress(long address, long length) {
         if (address == 0 || length < Short.BYTES || !memory.isBacked(address, Short.BYTES)) {
             return UnixAddressResult.error(EFAULT);
         }
@@ -3510,7 +3817,7 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
     }
 
     /// Writes one host socket address as a guest IPv4 or IPv6 socket address.
-    private long writeInetSocketAddress(
+    protected long writeInetSocketAddress(
             InetSocketAddress socketAddress,
             int domain,
             long address,
@@ -3551,7 +3858,7 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
     }
 
     /// Writes one guest Unix-domain socket address.
-    private long writeUnixSocketAddress(@Nullable String guestPath, long address, long lengthAddress) {
+    protected long writeUnixSocketAddress(@Nullable String guestPath, long address, long lengthAddress) {
         if (lengthAddress != 0 && !memory.isBacked(lengthAddress, Integer.BYTES)) {
             return EFAULT;
         }
@@ -3580,12 +3887,12 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
     }
 
     /// Returns the byte size of a guest Unix-domain socket address.
-    private static long unixSockaddrSize(@Nullable String guestPath) {
+    protected static long unixSockaddrSize(@Nullable String guestPath) {
         return unixSockaddrSize(guestPath == null ? null : guestPath.getBytes(StandardCharsets.UTF_8));
     }
 
     /// Returns the byte size of a guest Unix-domain socket address.
-    private static long unixSockaddrSize(byte @Nullable [] pathBytes) {
+    protected static long unixSockaddrSize(byte @Nullable [] pathBytes) {
         return pathBytes == null || pathBytes.length == 0
                 ? SOCKADDR_UN_PATH_OFFSET
                 : SOCKADDR_UN_PATH_OFFSET + pathBytes.length + 1L;
@@ -3601,17 +3908,17 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
     }
 
     /// Returns the byte size of the guest socket address for one Internet address family.
-    private static long sockaddrSize(int domain) {
+    protected static long sockaddrSize(int domain) {
         return domain == AF_INET6 ? SOCKADDR_IN6_SIZE : SOCKADDR_IN_SIZE;
     }
 
     /// Reads a network-endian port field from guest memory.
-    private int readNetworkPort(long address) {
+    protected int readNetworkPort(long address) {
         return (memory.readUnsignedByte(address) << Byte.SIZE) | memory.readUnsignedByte(address + 1);
     }
 
     /// Writes a network-endian port field to guest memory.
-    private void writeNetworkPort(long address, int port) {
+    protected void writeNetworkPort(long address, int port) {
         memory.writeByte(address, (byte) (port >>> Byte.SIZE));
         memory.writeByte(address + 1, (byte) port);
     }
@@ -3693,7 +4000,7 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
     ///
     /// @param address the decoded host socket address
     /// @param error the raw negative Linux error, or zero on success
-    private record AddressResult(@Nullable InetSocketAddress address, long error) {
+    protected record AddressResult(@Nullable InetSocketAddress address, long error) {
         /// Creates a successful address result.
         static AddressResult address(InetSocketAddress address) {
             return new AddressResult(address, 0);
@@ -3709,7 +4016,7 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
     ///
     /// @param address the decoded guest-to-host Unix-domain socket address
     /// @param error the raw negative Linux error, or zero on success
-    private record UnixAddressResult(@Nullable UnixSocketAddress address, long error) {
+    protected record UnixAddressResult(@Nullable UnixSocketAddress address, long error) {
         /// Creates a successful address result.
         static UnixAddressResult address(UnixSocketAddress address) {
             return new UnixAddressResult(address, 0);
@@ -3725,7 +4032,7 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
     ///
     /// @param guestPath the normalized guest path supplied to `connect`
     /// @param hostAddress the host Unix-domain socket address reached through a bind mount
-    private record UnixSocketAddress(String guestPath, UnixDomainSocketAddress hostAddress) {
+    protected record UnixSocketAddress(String guestPath, UnixDomainSocketAddress hostAddress) {
     }
 
     /// Stores the result of receiving bytes from a guest Internet socket.
@@ -4297,6 +4604,9 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
         /// The Linux protocol number.
         private final int protocol;
 
+        /// The selector registered before host readiness transitions can occur.
+        private final Selector readinessSelector;
+
         /// The TCP client channel, or null for datagram and listening sockets.
         private @Nullable SocketChannel streamChannel;
 
@@ -4323,6 +4633,9 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
 
         /// Whether `SO_KEEPALIVE` is enabled.
         private boolean keepAlive;
+
+        /// Whether `SO_BROADCAST` is enabled.
+        private boolean broadcast;
 
         /// Whether `TCP_NODELAY` is enabled.
         private boolean tcpNoDelay;
@@ -4358,8 +4671,10 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
             this.protocol = protocol == 0
                     ? (socketType == SOCK_STREAM ? (int) IPPROTO_TCP : (int) IPPROTO_UDP)
                     : (int) protocol;
+            readinessSelector = Selector.open();
             if (socketType == SOCK_DGRAM) {
                 datagramChannel = networkBackend.openDatagramChannel(protocolFamily(domain));
+                registerReadinessChannel(datagramChannel);
             }
         }
 
@@ -4368,8 +4683,10 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
             domain = server.domain;
             socketType = (int) SOCK_STREAM;
             protocol = (int) IPPROTO_TCP;
+            readinessSelector = Selector.open();
             streamChannel = acceptedChannel;
             streamChannel.configureBlocking(false);
+            registerReadinessChannel(streamChannel);
             boundAddress = socketAddress(streamChannel.getLocalAddress());
             peerAddress = socketAddress(streamChannel.getRemoteAddress());
             reuseAddress = server.reuseAddress;
@@ -4408,6 +4725,7 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
                 }
                 streamChannel = networkBackend.openSocketChannel(protocolFamily(domain));
                 applyOptions(streamChannel);
+                registerReadinessChannel(streamChannel);
                 streamChannel.bind(address);
                 boundAddress = socketAddress(streamChannel.getLocalAddress());
                 return 0;
@@ -4480,11 +4798,13 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
                 if (serverChannel == null) {
                     @Nullable InetSocketAddress listenAddress = boundAddress;
                     if (streamChannel != null) {
+                        unregisterReadinessChannel(streamChannel);
                         streamChannel.close();
                         streamChannel = null;
                     }
                     serverChannel = networkBackend.openServerSocketChannel(protocolFamily(domain));
                     applyOptions(serverChannel);
+                    registerReadinessChannel(serverChannel);
                     serverChannel.bind(
                             listenAddress == null ? new InetSocketAddress(wildcardAddress(domain), 0) : listenAddress,
                             backlog);
@@ -4735,28 +5055,30 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
             int events = 0;
             if (socketType == SOCK_DGRAM) {
                 DatagramChannel channel = datagramChannel();
-                if (readyNow(channel, SelectionKey.OP_READ)) {
+                int readyOperations = readyOperations(channel);
+                if ((readyOperations & SelectionKey.OP_READ) != 0) {
                     events |= EPOLLIN;
                 }
                 events |= EPOLLOUT;
                 return events;
             }
             if (serverChannel != null && listening) {
-                return readyNow(serverChannel, SelectionKey.OP_ACCEPT) ? EPOLLIN : 0;
+                return (readyOperations(serverChannel) & SelectionKey.OP_ACCEPT) != 0 ? EPOLLIN : 0;
             }
             if (streamChannel == null) {
                 return EPOLLOUT;
             }
             if (streamChannel.isConnectionPending()) {
-                return readyNow(streamChannel, SelectionKey.OP_CONNECT) ? EPOLLOUT : 0;
+                return (readyOperations(streamChannel) & SelectionKey.OP_CONNECT) != 0 ? EPOLLOUT : 0;
             }
             if (!streamChannel.isConnected()) {
                 return EPOLLHUP;
             }
-            if (!readShutdown && readyNow(streamChannel, SelectionKey.OP_READ)) {
+            int readyOperations = readyOperations(streamChannel);
+            if (!readShutdown && (readyOperations & SelectionKey.OP_READ) != 0) {
                 events |= EPOLLIN;
             }
-            if (!writeShutdown && readyNow(streamChannel, SelectionKey.OP_WRITE)) {
+            if (!writeShutdown && (readyOperations & SelectionKey.OP_WRITE) != 0) {
                 events |= EPOLLOUT;
             }
             return events;
@@ -4766,9 +5088,18 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
         @Override
         public void close() throws IOException {
             IOException failure = null;
-            failure = closeChannel(streamChannel, failure);
-            failure = closeChannel(serverChannel, failure);
-            failure = closeChannel(datagramChannel, failure);
+            synchronized (readinessSelector) {
+                failure = closeChannel(streamChannel, failure);
+                failure = closeChannel(serverChannel, failure);
+                failure = closeChannel(datagramChannel, failure);
+                try {
+                    readinessSelector.close();
+                } catch (IOException exception) {
+                    if (failure == null) {
+                        failure = exception;
+                    }
+                }
+            }
             if (failure != null) {
                 throw failure;
             }
@@ -4779,6 +5110,7 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
             if (streamChannel == null) {
                 streamChannel = networkBackend.openSocketChannel(protocolFamily(domain));
                 applyOptions(streamChannel);
+                registerReadinessChannel(streamChannel);
             }
             return streamChannel;
         }
@@ -4818,7 +5150,7 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
             if (!channel.isConnectionPending()) {
                 return channel.isConnected() ? 0 : ENOTCONN;
             }
-            if (!readyNow(channel, SelectionKey.OP_CONNECT)) {
+            if ((readyOperations(channel) & SelectionKey.OP_CONNECT) == 0) {
                 return EINPROGRESS;
             }
             return finishConnect(channel);
@@ -4856,6 +5188,10 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
                 keepAlive = value != 0;
                 return setBooleanOption(StandardSocketOptions.SO_KEEPALIVE, keepAlive);
             }
+            if (option == SO_BROADCAST && socketType == SOCK_DGRAM) {
+                broadcast = value != 0;
+                return setBooleanOption(StandardSocketOptions.SO_BROADCAST, broadcast);
+            }
             if (option == SO_SNDBUF) {
                 if (value <= 0) {
                     return EINVAL;
@@ -4883,6 +5219,9 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
             }
             if (option == SO_KEEPALIVE && socketType == SOCK_STREAM) {
                 return OptionResult.value(booleanOption(StandardSocketOptions.SO_KEEPALIVE, keepAlive) ? 1 : 0);
+            }
+            if (option == SO_BROADCAST && socketType == SOCK_DGRAM) {
+                return OptionResult.value(booleanOption(StandardSocketOptions.SO_BROADCAST, broadcast) ? 1 : 0);
             }
             if (option == SO_SNDBUF) {
                 return OptionResult.value(integerOption(StandardSocketOptions.SO_SNDBUF, sendBufferSize));
@@ -4921,6 +5260,9 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
             if (channel instanceof SocketChannel socketChannel) {
                 socketChannel.setOption(StandardSocketOptions.SO_KEEPALIVE, keepAlive);
                 socketChannel.setOption(StandardSocketOptions.TCP_NODELAY, tcpNoDelay);
+            }
+            if (channel instanceof DatagramChannel datagram) {
+                datagram.setOption(StandardSocketOptions.SO_BROADCAST, broadcast);
             }
         }
 
@@ -4977,6 +5319,43 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
                 return serverChannel;
             }
             return datagramChannel;
+        }
+
+        /// Registers a newly opened channel for persistent readiness observation.
+        private void registerReadinessChannel(SelectableChannel channel) throws ClosedChannelException {
+            synchronized (readinessSelector) {
+                channel.register(readinessSelector, channel.validOps());
+            }
+        }
+
+        /// Cancels a channel's readiness registration and processes the cancellation immediately.
+        private void unregisterReadinessChannel(SelectableChannel channel) throws IOException {
+            synchronized (readinessSelector) {
+                @Nullable SelectionKey key = channel.keyFor(readinessSelector);
+                if (key != null) {
+                    key.cancel();
+                }
+                readinessSelector.selectNow();
+                readinessSelector.selectedKeys().clear();
+            }
+        }
+
+        /// Returns the operations currently reported by this socket's persistent selector.
+        private int readyOperations(SelectableChannel channel) {
+            synchronized (readinessSelector) {
+                @Nullable SelectionKey key = channel.keyFor(readinessSelector);
+                if (key == null || !key.isValid()) {
+                    return 0;
+                }
+                try {
+                    readinessSelector.selectNow();
+                    int operations = readinessSelector.selectedKeys().contains(key) ? key.readyOps() : 0;
+                    readinessSelector.selectedKeys().clear();
+                    return operations;
+                } catch (IOException | java.nio.channels.CancelledKeyException exception) {
+                    return 0;
+                }
+            }
         }
 
         /// Stores a socket error for later `SO_ERROR` retrieval.
@@ -5627,7 +6006,7 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
 
 
     /// Creates a child-process Linux syscall handler by copying fork-inherited parent state.
-    private LinuxGuestSyscalls(LinuxGuestSyscalls parent, Memory memory, GuestProcess process) {
+    protected LinuxGuestSyscalls(LinuxGuestSyscalls parent, Memory memory, GuestProcess process) {
         super(parent, memory, process);
         networkBackend = parent.networkBackend;
         System.arraycopy(parent.signalActions, 0, signalActions, 0, signalActions.length);
@@ -5685,6 +6064,12 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
     /// The Linux RISC-V syscall number for `unlinkat`.
     private static final int SYS_UNLINKAT = 35;
 
+    /// The Linux RISC-V syscall number for `symlinkat`.
+    private static final int SYS_SYMLINKAT = 36;
+
+    /// The Linux RISC-V syscall number for `linkat`.
+    private static final int SYS_LINKAT = 37;
+
     /// The Linux RISC-V syscall number for `renameat`.
     private static final int SYS_RENAMEAT = 38;
 
@@ -5699,6 +6084,9 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
 
     /// The Linux RISC-V syscall number for `ftruncate`.
     private static final int SYS_FTRUNCATE = 46;
+
+    /// The Linux RISC-V syscall number for `fallocate`.
+    private static final int SYS_FALLOCATE = 47;
 
     /// The Linux RISC-V syscall number for `faccessat`.
     private static final int SYS_FACCESSAT = 48;
@@ -5810,6 +6198,9 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
 
     /// The Linux RISC-V syscall number for `exit_group`.
     private static final int SYS_EXIT_GROUP = 94;
+
+    /// The Linux RISC-V syscall number for `waitid`.
+    private static final int SYS_WAITID = 95;
 
     /// The Linux RISC-V syscall number for `set_tid_address`.
     private static final int SYS_SET_TID_ADDRESS = 96;
@@ -6054,6 +6445,15 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
     /// The Linux RISC-V syscall number for `clone`.
     private static final int SYS_CLONE = 220;
 
+    /// The Linux RISC-V syscall number for `fadvise64`.
+    private static final int SYS_FADVISE64 = 223;
+
+    /// The Linux RISC-V syscall number for `pidfd_send_signal`.
+    private static final int SYS_PIDFD_SEND_SIGNAL = 424;
+
+    /// The Linux RISC-V syscall number for `pidfd_open`.
+    private static final int SYS_PIDFD_OPEN = 434;
+
     /// The Linux RISC-V syscall number for `clone3`.
     private static final int SYS_CLONE3 = 435;
 
@@ -6137,6 +6537,9 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
 
     /// The Linux RISC-V syscall number for `mlock2`.
     private static final int SYS_MLOCK2 = 284;
+
+    /// The Linux RISC-V syscall number for `copy_file_range`.
+    private static final int SYS_COPY_FILE_RANGE = 285;
 
     /// The Linux RISC-V syscall number for `preadv2`.
     private static final int SYS_PREADV2 = 286;
@@ -6223,6 +6626,16 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
             case SYS_IOCTL -> state.setRegister(10, ioctl((int) state.register(10), state.register(11), state.register(12)));
             case SYS_MKDIRAT -> state.setRegister(10, mkdirat(state.register(10), state.register(11), state.register(12)));
             case SYS_UNLINKAT -> state.setRegister(10, unlinkat(state.register(10), state.register(11), state.register(12)));
+            case SYS_SYMLINKAT -> state.setRegister(10, symlinkat(
+                    state.register(10),
+                    state.register(11),
+                    state.register(12)));
+            case SYS_LINKAT -> state.setRegister(10, linkat(
+                    state.register(10),
+                    state.register(11),
+                    state.register(12),
+                    state.register(13),
+                    state.register(14)));
             case SYS_RENAMEAT -> state.setRegister(10, renameat(
                     state.register(10),
                     state.register(11),
@@ -6232,6 +6645,11 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
             case SYS_FSTATFS -> state.setRegister(10, fstatfs((int) state.register(10), state.register(11)));
             case SYS_TRUNCATE -> state.setRegister(10, truncate(state.register(10), state.register(11)));
             case SYS_FTRUNCATE -> state.setRegister(10, ftruncate((int) state.register(10), state.register(11)));
+            case SYS_FALLOCATE -> state.setRegister(10, fallocate(
+                    (int) state.register(10),
+                    state.register(11),
+                    state.register(12),
+                    state.register(13)));
             case SYS_FACCESSAT -> state.setRegister(10, faccessat(state.register(10), state.register(11), state.register(12), 0));
             case SYS_CHDIR -> state.setRegister(10, chdir(state.register(10)));
             case SYS_FCHDIR -> state.setRegister(10, fchdir((int) state.register(10)));
@@ -6341,6 +6759,13 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
                 throw new ProgramExitException(state.register(10));
             }
             case SYS_EXIT -> exitThread(state, state.register(10));
+            case SYS_WAITID -> state.setRegister(10, waitid(
+                    state,
+                    state.register(10),
+                    state.register(11),
+                    state.register(12),
+                    state.register(13),
+                    state.register(14)));
             case SYS_SET_TID_ADDRESS -> state.setRegister(10, setTidAddress(state, state.register(10)));
             case SYS_FUTEX -> state.setRegister(10, futex(
                     state.register(10),
@@ -6564,6 +6989,11 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
                     state.register(12),
                     state.register(13),
                     state.register(14)));
+            case SYS_FADVISE64 -> state.setRegister(10, posixFadvise(
+                    (int) state.register(10),
+                    state.register(11),
+                    state.register(12),
+                    state.register(13)));
             case SYS_CLONE3 -> state.setRegister(10, clone3(
                     state,
                     pc,
@@ -6615,6 +7045,7 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
                     state.register(11),
                     state.register(12)));
             case SYS_WAIT4 -> state.setRegister(10, wait4(
+                    state,
                     state.register(10),
                     state.register(11),
                     state.register(12),
@@ -6638,6 +7069,13 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
             case SYS_GETRANDOM -> state.setRegister(10, getrandom(state.register(10), state.register(11), state.register(12)));
             case SYS_MEMBARRIER -> state.setRegister(10, membarrier(state.register(10), state.register(11), state.register(12)));
             case SYS_MLOCK2 -> state.setRegister(10, mlock2(state.register(10), state.register(11), state.register(12)));
+            case SYS_COPY_FILE_RANGE -> state.setRegister(10, copyFileRange(
+                    (int) state.register(10),
+                    state.register(11),
+                    (int) state.register(12),
+                    state.register(13),
+                    state.register(14),
+                    state.register(15)));
             case SYS_PREADV2 -> state.setRegister(10, preadv2(
                     (int) state.register(10),
                     state.register(11),
@@ -6680,6 +7118,14 @@ public final class LinuxGuestSyscalls extends GuestSyscalls {
                     state.register(11),
                     state.register(12),
                     state.register(13)));
+            case SYS_PIDFD_SEND_SIGNAL -> state.setRegister(10, pidfdSendSignal(
+                    (int) state.register(10),
+                    state.register(11),
+                    state.register(12),
+                    state.register(13)));
+            case SYS_PIDFD_OPEN -> state.setRegister(10, pidfdOpen(
+                    state.register(10),
+                    state.register(11)));
             case SYS_CLOSE_RANGE -> state.setRegister(10, closeRange(
                     state.register(10),
                     state.register(11),

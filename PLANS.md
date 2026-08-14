@@ -2,7 +2,7 @@
 
 ## Scope
 
-- GraalRISCV is a user-mode RV64 emulator for 64-bit little-endian RISC-V ELF programs.
+- JRISC-V is a user-mode RV64 emulator for 64-bit little-endian RISC-V ELF programs.
 - Linux-like user-mode execution is the primary compatibility target; FreeBSD user-mode support is incremental.
 - Privileged mode, guest page tables, interrupts, devices, and Linux kernel boot are out of scope unless a later plan explicitly adds them.
 
@@ -10,13 +10,14 @@
 
 - ISA support targets RVA23U64 when the configured VLEN is profile-valid; shorter vector configurations expose the RVA22U64 capability surface.
 - Linux workload coverage includes static C/musl/Go programs, SQLite, CoreMark, RVV examples, `riscv-tests`, Ubuntu Base dynamic-linking smoke tests, interactive shells, fastfetch, curl, and interpreted BellSoft JDK 25 `java -version` and `jshell --version`.
-- FreeBSD support covers the static user-mode programs needed by the FreeBSD Go hello-world smoke workload.
+- FreeBSD support covers static Go hello-world and standard-library showcase workloads, including filesystem metadata and mutations, links, timestamp updates, local TCP/UDP networking through kqueue, and `os/exec` child processes through `fork`/`execve`/`wait4` with `kern.proc.pathname` executable-path discovery.
 - Gradle-managed external downloads are cached under project-root `downloads/` so `clean` preserves them.
 
 ### Runtime Surface
 
 - Syscall handling is split by guest ABI: `GuestSyscalls` owns shared runtime state and helpers, while `LinuxGuestSyscalls` and `FreeBsdGuestSyscalls` own ABI-specific dispatch and compatibility behavior.
-- Linux runtime support includes process/thread state, mutable guest credentials, setuid/setgid exec credential transitions, child-exit `SIGCHLD` delivery, deterministic time, tracked `getitimer`/`setitimer` interval timer state, `clone`/`wait4`, resource-limit reporting and lowering through `getrlimit`/`setrlimit`/`prlimit64`, single-CPU scheduling policy/priority and affinity syscalls, positioned scalar/vector file I/O, validated memory-sync and memory-locking no-op syscalls, descriptor close-on-exec and `close_range` handling, blocking `eventfd2` counters, Linux `timerfd_create`/`timerfd_settime`/`timerfd_gettime`, event-aware `epoll_pwait`/`epoll_pwait2`/`pselect6`/`ppoll` waits for guest-internal descriptors, Linux `#!` binary-format rewriting, terminal raw-mode behavior, and CLI environment overrides.
+- FreeBSD runtime support includes ABI-specific errno conversion, real/effective/saved credential mutation, current and compatibility supplementary-group ABIs, shared session identity and login names with constrained `setsid`, persistent clamped nice values with native negative-success returns, sticky `issetugid` state, deterministic `getrandom`, native POSIX scheduling ranges, numbered single-CPU set allocation and process assignment with cpuset affinity and single-domain memory policies, privileged memory locking, thread naming, one-shot pending `thr_suspend`/`thr_wake` coordination, targeted signal probes, traditional pipe and select/poll readiness interfaces, timer file descriptors, descriptor-range closing with close-on-exec and close-on-fork inheritance, advisory whole-file and record locking, interval and nanosecond sleeps, mapped-memory synchronization and residency calls, positioned vector I/O, regular-file range copying and zeroing, POSIX file allocation and access advice, path configuration queries, process creation and `wait4`/`wait6` observation and reaping, `execve` entry-state setup, read-only runtime sysctl queries, file and filesystem metadata layouts, native directory-entry encoding, traditional and `*at` mutation calls including the current `renameat2` entry point, link creation, path and open-descriptor timestamp updates with native sentinels, native socket structures and flags, and current and legacy kqueue event layouts.
+- Linux runtime support includes process/thread state, mutable guest credentials, setuid/setgid exec credential transitions, shared session identity with constrained `setpgid`/`setsid`, persistent clamped nice values, child-exit `SIGCHLD` delivery, deterministic time, tracked `getitimer`/`setitimer` interval timer state, `clone` with normal/clone-child selection and `CLONE_PIDFD`, `wait4`, non-reaping `waitid` including `P_PIDFD`, `pidfd_open`/`pidfd_send_signal`, pollable process descriptors, resource-limit reporting and lowering through `getrlimit`/`setrlimit`/`prlimit64`, single-CPU scheduling policy/priority and affinity syscalls, positioned scalar/vector file I/O, regular-file range copying, file allocation and access advice, validated memory-sync and memory-locking no-op syscalls, descriptor close-on-exec and `close_range` handling, blocking `eventfd2` counters, Linux `timerfd_create`/`timerfd_settime`/`timerfd_gettime`, event-aware `epoll_pwait`/`epoll_pwait2`/`pselect6`/`ppoll` waits for guest-internal descriptors, Linux `#!` binary-format rewriting, terminal raw-mode behavior, and CLI environment overrides.
 - LTP syscall work includes a coverage report and an ABI-table driven static smoke ELF for core identity, process/resource, time, random, and filesystem behavior.
 
 ### Filesystems And Devices
@@ -28,7 +29,7 @@
 ### Networking
 
 - Network backend selection lives under `org.glavo.riscv.runtime.net`.
-- The opt-in host networking backend supports IPv4/IPv6 TCP client/server sockets, UDP datagrams, batched message syscalls, deterministic `NETLINK_ROUTE` metadata, bind-mounted Unix-domain stream client sockets for X11/Swing workloads, and local Unix-domain stream socket pairs.
+- The opt-in host networking backend supports Linux and FreeBSD IPv4/IPv6 TCP client/server sockets, UDP datagrams, batched message syscalls, FreeBSD kqueue readiness, deterministic Linux `NETLINK_ROUTE` metadata, bind-mounted Unix-domain stream client sockets for X11/Swing workloads, and local Unix-domain stream socket pairs.
 
 ### Execution Engine
 

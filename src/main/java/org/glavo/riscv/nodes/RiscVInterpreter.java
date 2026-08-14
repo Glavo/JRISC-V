@@ -385,7 +385,8 @@ public final class RiscVInterpreter {
                     context.useHostTty(),
                     credentials,
                     this::runGuestThread,
-                    context.framebufferDevice());
+                    context.framebufferDevice(),
+                    context.networkBackend());
         };
     }
 
